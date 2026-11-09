@@ -1,53 +1,81 @@
 # shellmate
 
-**Talk to your terminal.** Say what you want in plain English; shellmate works out the shell
+[![CI](https://github.com/prameshbhattarai/shellmate/actions/workflows/ci.yml/badge.svg)](https://github.com/prameshbhattarai/shellmate/actions/workflows/ci.yml)
+
+**Talk to your terminal.** Say what you want in plain English. shellmate works out the shell
 commands, labels each one by risk, runs it after you approve, reads the output, and keeps going until
-the job is done. It runs on a local model (Qwen via Ollama), so nothing leaves your machine.
+it can answer you. It runs on a local model (Qwen via Ollama), so nothing leaves your machine.
 
-> Status: working agent loop with a rule-based risk gate. Memory, extra tools and evals are next. See [Roadmap](#roadmap).
+<!-- Record with ./scripts/demo.sh, then uncomment:
+![shellmate demo](docs/demo.gif)
+-->
 
-```
-$ shellmate
+```text
 you> which folders here are eating my disk?
-[plan]  du -sh ./* | sort -rh | head -5          risk: SAFE (read-only) -> auto-run
-[out]   4.7G venv   1.2G node_modules   ...
-mate>   venv (4.7G) and node_modules (1.2G). Want me to remove node_modules?
-you> yes
-[plan]  rm -rf ./node_modules                     risk: DANGER (deletes files)
-        Run? [y/n/edit]  y
-mate>   Done, freed 1.2G. `npm install` brings it back.
+╭─ command ────────────────────────╮
+│ du -sh * | sort -rh | head -n 10 │
+╰──────────────────────────────────╯
+risk  SAFE  read-only
+3.0M    node_modules
+8.0K    src
+mate> node_modules is the biggest at 3.0M; everything else is tiny.
 
-you> why did this fail?   (after a failed `git push`)
-mate>   Your branch is behind origin. Run `git pull --rebase` then push again. Do it? [y/n]
+you> delete the node_modules folder
+╭─ command ───────────╮
+│ rm -rf node_modules │
+╰─────────────────────╯
+risk  DANGER  deletes files permanently (no trash)
+Dangerous. Type yes to run it, e to edit, Enter to skip: yes
+done (no output)
+mate> Deleted node_modules. `npm install` brings it back.
+
+you> delete everything in my home folder
+╭─ command ──╮
+│ rm -rf ~/* │
+╰────────────╯
+risk  BLOCKED  rm on ~/* would wreck your system or home folder
+shellmate will not run this. Asking the model for another way.
+mate> I won't do that: it would wipe your home folder.
 ```
+*(An example session: the layout is exactly what shellmate prints; the model's wording varies.)*
 
-## How it works
+## What it does
 
-```
-decide -> classify_risk -> run (SAFE) | ask_human (CAUTION / DANGER) | refuse (BLOCKED) -> decide ... -> answer
-```
+- **An agent loop, not a one-shot.** The model proposes one step at a time, reads the output, and
+  decides the next step or answers. It's built on [LangGraph](https://langchain-ai.github.io/langgraph/)
+  with a step cap, and repeats are caught in code.
+- **Risk is decided by rules, never by the model.** Every command is labelled before it runs, edits
+  included:
 
-- **Agent loop** in [LangGraph](https://langchain-ai.github.io/langgraph/): the model proposes one
-  command at a time, reads its output and picks the next step or answers, with a step cap.
-  Repeated commands are caught in code, not just in the prompt.
-- **The model only proposes.** It returns a structured `Decision` (run a command, or answer); the
-  graph runs it, and the only action available is `run_command`: timeout, no keyboard input, output
-  capped.
-- **Risk is decided by rules, never by the model.** Every command, including one you edited, is
-  labelled before it runs: SAFE runs, CAUTION asks `y/N`, DANGER needs the full word `yes`, and
-  BLOCKED (`rm -rf ~`, `curl | sh`, `dd` to a disk ...) never runs.
-- **Human-in-the-loop with `interrupt()`.** Approval pauses the graph and the CLI resumes it with
-  your answer, so any front end can drive the same agent.
-- Planned: file and history tools, memory across sessions (SQLite), evals scored in CI.
+  | Level | Examples | What happens |
+  |---|---|---|
+  | SAFE | `ls`, `du`, `git log`, `grep` | runs straight away |
+  | CAUTION | `mkdir`, `git add`, `>> file`, `pip install` | asks `y/N` |
+  | DANGER | `rm`, `mv`, `git push`, `> file`, `sudo`, unknown programs | needs the full word `yes` |
+  | BLOCKED | `rm -rf ~`, `curl … \| sh`, `dd` to a disk, `cd ~ && rm -rf *` | never runs |
 
-**Full walkthrough with flowcharts: [docs/how-it-works.md](docs/how-it-works.md)** - the agent
-graph node by node, what the model sees, the approval pause, and the risk rules.
+  The rules look through `sudo -u`, `xargs`, `env -S` and `su -c`, follow `cd`, and resolve paths
+  against the folder you're in.
+- **Read-only tools** let the model read a file, list a folder, or look at your command history or
+  last error without running anything. They only see the current folder.
+- **Human in the loop.** Approvals use LangGraph's `interrupt()`. Press Ctrl-C at a prompt to
+  pause, and `shellmate resume` continues later from a SQLite checkpoint, even after a restart.
+- **`shellmate explain`**: pipe an error in (`make 2>&1 | shellmate explain`) or just run it after a
+  failure, and it investigates and suggests a fix.
+- **`shellmate undo`** reverses the last change it made here (`mkdir` → `rmdir`, `git commit` →
+  `git reset --soft HEAD~1` …). It only acts when the inverse is known, and asks first.
+- **Memory**: `shellmate remember "my projects live in ~/code"` is added to every prompt.
+- **Personas and teach mode**: `--persona terse|mentor|pirate`, and `--teach` adds a line
+  explaining each command so you learn it.
+- **Ctrl-G from your prompt**: `eval "$(shellmate init zsh)"`, then type a request and press
+  Ctrl-G instead of Enter.
+- **Evals**: 55 cases scored per model, and checked for consistency in CI.
 
 ## Quick start
 
 ```bash
 # 1. A local model (one-off)
-brew install ollama && ollama pull qwen2.5:3b
+brew install ollama && ollama pull qwen2.5:3b     # or qwen2.5:7b: slower, noticeably smarter
 
 # 2. Install
 python3 -m venv .venv && source .venv/bin/activate
@@ -55,36 +83,231 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # 3. Run
-shellmate            # interactive
-shellmate --help
+shellmate                                   # interactive
+shellmate ask "what was my last commit message?"
 ```
+
+More in [Examples](#examples).
+
+## Examples
+
+### Ask a question
+
+Read-only commands run straight away, and you get a plain-English answer at the end:
+
+```bash
+shellmate ask "what was my last git commit message?"
+```
+```text
+╭─ command ──────────────╮
+│ git log -1 --format=%B │
+╰────────────────────────╯
+risk  SAFE  git log only reads
+agent skeleton.
+mate> Your last commit was "agent skeleton."
+```
+
+Some more to try:
+
+```bash
+shellmate ask "which folders here are eating my disk?"
+shellmate ask "how many python files are in this project?"
+shellmate ask "what is listening on port 3000?"
+shellmate ask "show me what's in README.md"        # uses read_file, no command needed
+```
+
+### Make a change, with your approval
+
+Anything that changes something asks first. A CAUTION command takes `y`, and a DANGER one needs
+the full word `yes`:
+
+```bash
+shellmate ask "create a folder called notes"        # CAUTION: Run it? [y/N/e(dit)]
+shellmate ask "delete the node_modules folder"      # DANGER: Type yes to run it ...
+```
+
+At the prompt, `e` lets you edit the command first. The edited command is checked again, so you
+can't edit your way past the rules. Enter, or `n`, skips it.
+
+### See the plan without running anything
+
+```bash
+shellmate --dry-run ask "remove all .pyc files"
+```
+
+This shows the first command and its risk level, and stops there.
+
+### Have a conversation
+
+```bash
+shellmate
+```
+```text
+you> what branch am I on?
+...
+mate> You're on main.
+you> show my last 5 commits
+...
+you> exit
+```
+
+### Explain an error
+
+```bash
+npm run build 2>&1 | shellmate explain              # pipe the error in
+shellmate explain "fatal: not a git repository"     # or paste it
+shellmate explain                                    # or use the last command shellmate saw fail
+```
+
+Before it explains, shellmate may run a few commands to investigate, such as `git status` or `ls`.
+They go through the usual risk checks.
+
+### Pause now, decide later
+
+Press **Ctrl-C** at any approval prompt. Nothing runs, and the run is saved:
+
+```text
+Dangerous. Type yes to run it, e to edit, Enter to skip: ^C
+paused - nothing ran. `shellmate resume` picks it up, even after a restart.
+```
+```bash
+shellmate resume                                     # shows the same question again
+```
+
+### Undo the last change
+
+```bash
+shellmate ask "create a folder called scratch"       # answer y
+shellmate undo                                       # proposes `rmdir scratch`, asks, then runs it
+```
+
+Undo only covers changes it understands (`mkdir`, `git add`, `git commit`, `git switch`,
+`git stash`, `git branch`, `mv`, `ln -s`). For anything else it tells you it can't, instead of
+guessing. For git changes it also checks that you haven't committed, switched branch or stashed by
+hand since; if you have, it refuses rather than undo the wrong thing.
+
+### Teach it about you
+
+```bash
+shellmate remember "my projects live in ~/Documents/workspace"
+shellmate remember "I use pnpm, not npm"
+shellmate profile                                    # list the notes
+shellmate forget 2                                   # forget note 2 (no number: forget all)
+```
+
+Notes are added to every prompt, so a request like "how big are my projects?" knows where to look.
+
+### Change the style, or learn as you go
+
+```bash
+shellmate --persona terse ask "how much free disk space do I have?"
+shellmate --persona pirate ask "what branch am I on?"
+shellmate --teach ask "find files bigger than 100MB here"   # adds a line explaining find -size
+```
+
+Set `SHELLMATE_PERSONA` in `.env` to make a persona the default.
+
+### Use a bigger model for a harder request
+
+```bash
+shellmate --model qwen2.5:7b ask "why is my git push being rejected?"
+```
+
+### Press Ctrl-G from your normal prompt
+
+```bash
+echo 'eval "$(shellmate init zsh)"' >> ~/.zshrc && source ~/.zshrc
+```
+
+Now type a request at the zsh prompt, for example `what is using port 8080`, and press **Ctrl-G**
+instead of Enter.
+
+### Look back
+
+```bash
+shellmate history                 # the last 10 commands shellmate ran
+shellmate history -n 30 --here    # the last 30, only in this folder
+```
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `shellmate` | interactive session |
+| `shellmate ask "..."` | one request, then exit with the outcome's exit code |
+| `shellmate explain [TEXT]` | explain an error: an argument, piped input, or your last failed command |
+| `shellmate resume` | continue the run you paused with Ctrl-C at a prompt |
+| `shellmate undo` | reverse the last change shellmate made in this folder |
+| `shellmate history [-n 20] [--here]` | commands shellmate ran |
+| `shellmate remember "..."` / `forget [N]` / `profile` | notes added to every prompt |
+| `shellmate init zsh` | prints the Ctrl-G key binding |
+
+Global options go before the command: `--model qwen2.5:7b`, `--dry-run` (show the first command, run
+nothing), `--confirm-all` (ask even for SAFE), `--verbose` (full output), `--persona`, `--teach`.
+
+## How it works
+
+```
+decide ─┬─ tool (read_file, list_dir, history, last_error) ──────────────────────┐
+        ├─ run → classify_risk ─┬─ SAFE ──────────────→ run ──────────────────────┤→ decide …
+        │                       ├─ CAUTION / DANGER ──→ ask_human (interrupt) → run ┘
+        │                       └─ BLOCKED ───────────→ refuse ──────────────────→ decide …
+        └─ answer → END
+```
+
+**Full walkthrough with flowcharts: [docs/how-it-works.md](docs/how-it-works.md)**: the graph node
+by node, what the model sees, the approval pause, the risk rules, memory, undo and evals.
+
+## Evals
+
+```bash
+python evals/run_evals.py --check                              # no model: is the eval set consistent?
+python evals/run_evals.py --model qwen2.5:3b,qwen2.5:7b        # score models (one call per case)
+```
+
+Scoring asks each model for the first step of every case and never runs anything. It checks the
+action, matches the command against a regex, and confirms the rules give the expected risk level.
+
+| Model | Pass | Right action | Command matches | Risk label |
+|---|---|---|---|---|
+| qwen2.5:3b | not run yet | | | |
+| qwen2.5:7b | not run yet | | | |
+
+## Configuration
+
+Settings come from `.env` (see [.env.example](.env.example)): the model and Ollama URL, the context
+size, the step cap, the command timeout, the output cap, the persona, and `SHELLMATE_HOME` (default
+`~/.shellmate`, where history, notes and checkpoints live).
 
 ## Project layout
 
 ```
 shellmate/
-  cli.py        # typer entrypoint, REPL, rich rendering, answers the graph's approval pauses
-  agent.py      # system prompt, Decision schema, how outputs are fed back, repeat guards
-  graph.py      # LangGraph state and nodes: decide, classify_risk, ask_human, run, refuse
-  risk.py       # rule-based risk classifier: SAFE / CAUTION / DANGER / BLOCKED
-  tools.py      # run_command (read_file, list_dir, last_error planned)
-  config.py     # settings from env; builds the chat model lazily
-  memory.py     # session checkpoints + user profile (planned)
-docs/           # how-it-works.md: flowcharts of the agent, graph and risk rules
-evals/          # request -> expected command + risk, and the scorer
-tests/          # unit tests with a scripted fake model; never call Ollama
+  cli.py         # typer commands, REPL, rich rendering, answers the graph's approval pauses
+  agent.py       # system prompt, Decision schema, personas, how outputs are fed back, repeat guards
+  graph.py       # LangGraph state and nodes: decide, use_tool, classify_risk, ask_human, run, refuse
+  risk.py        # rule-based risk classifier: SAFE / CAUTION / DANGER / BLOCKED
+  tools.py       # run_command, read_file, list_dir
+  memory.py      # history, remembered notes, SQLite checkpoints, the paused run
+  undo.py        # inverse commands for `shellmate undo`
+  shell_init.py  # zsh Ctrl-G binding
+  config.py      # settings from env; builds the chat model lazily
+docs/            # how-it-works.md (flowcharts); demo.gif once recorded
+evals/           # 55 cases and the scorer
+scripts/demo.sh  # records the demo GIF
+tests/           # 261 unit tests with a scripted fake model; never call Ollama
 ```
 
 ## Roadmap
 
-- [x] Skeleton: CLI, module layout, smoke tests, CI
-- [x] One-shot: request -> one command -> confirm -> run -> print
-- [x] Risk classifier with unit tests (pure Python)
-- [x] LangGraph loop: observe output, decide next step, step cap, `interrupt()` approval
-- [ ] Tools for files, history, "explain last error"
-- [ ] Memory across sessions
-- [ ] Eval set (50 cases) + CI score badge; Qwen 3b vs 7b comparison table
-- [ ] Demo GIF, then fun extras: personas, "teach me" mode, `shellmate undo`, zsh key binding
+- [x] One-shot: request → command → confirm → run → print
+- [x] Risk classifier with unit tests
+- [x] LangGraph loop with `interrupt()` approvals
+- [x] Tools for files, history and "explain my last error"
+- [x] Memory across sessions: SQLite checkpoints, resume, notes
+- [x] Eval set (55 cases) and scorer; consistency check in CI
+- [x] Extras: personas, teach mode, `shellmate undo`, zsh key binding
+- [ ] Record the demo GIF (`./scripts/demo.sh`) and fill in the eval table
 
 ## License
 

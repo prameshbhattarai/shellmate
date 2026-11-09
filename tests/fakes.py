@@ -29,3 +29,7 @@ class ScriptedDecider:
 
     def last_message(self, call: int = -1) -> str:
         return self.calls[call][-1][1]
+
+
+def tool(action: str, path: str = "", why: str = "test tool") -> Decision:
+    return Decision(action=action, path=path, explanation=why)

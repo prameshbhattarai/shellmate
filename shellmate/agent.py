@@ -1,13 +1,15 @@
 """What the model sees and what it may say back.
 
-Each turn the model returns a :class:`Decision`: either run ONE command, or answer the user. It never
-runs anything itself; the graph (graph.py) risk-checks the command and asks the user when needed.
+Each turn the model returns a :class:`Decision`: run ONE command, use a read-only tool, or answer the
+user. It never runs anything itself; the graph (graph.py) risk-checks commands and asks the user
+when needed.
 """
 
 from __future__ import annotations
 
 import os
 import platform
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -17,9 +19,16 @@ reading their output, until you can answer them.
 
 Environment: {os_name}, shell {shell}. Commands run inside the user's current folder ({cwd}).
 
-Each turn, reply with exactly one of:
-- action "run": ONE command to run next, and a short explanation of why.
-- action "answer": a short, plain-English answer for the user, based on the outputs you have seen.
+Each turn, reply with exactly one action:
+- "run": ONE command in "command", and a short explanation of why.
+- "read_file": read a text file; put its path in "path". Prefer this to cat/head for looking
+  inside a file.
+- "list_dir": list a folder; put its path in "path" ("." for the current folder).
+- "history": see the last commands shellmate ran for the user, with their exit codes.
+- "last_error": see the most recent command that failed, with its error output. Use it when the
+  user asks about "my last error" or "why did that fail".
+- "answer": a short, plain-English answer for the user in "answer", based on what you have seen.
+The tools only read, and only inside the current folder, so they never need the user's approval.
 
 How to work:
 - Answer as soon as the outputs answer the request. Most requests need one command, some need two
@@ -47,7 +56,7 @@ Examples of good commands:
 - "what branch am I on?" -> git branch --show-current
 - "what was my last commit message?" -> git log -1 --format=%B
 - "how many python files are in this project?" -> find . -name '*.py' -type f | wc -l
-"""
+{extras}"""
 
 MACOS_RULES = """- This is macOS: BSD tools, not GNU. No `find -printf`, no `sed -i` without '', no `du --max-depth`
   (use `du -d 1`), no `ls --sort`.
@@ -58,11 +67,55 @@ RECENT_STEPS_IN_FULL = 2
 OLD_OUTPUT_CHARS = 300
 
 
+Action = Literal["run", "read_file", "list_dir", "history", "last_error", "answer"]
+TOOL_ACTIONS = ("read_file", "list_dir", "history", "last_error")
+
+
 class Decision(BaseModel):
-    action: Literal["run", "answer"] = Field(description='"run" to run a command next, "answer" to reply to the user.')
+    action: Action = Field(description="What to do next: run a command, use a read-only tool, or answer.")
     command: str = Field("", description='The single shell command to run when action is "run".')
-    explanation: str = Field("", description="One short sentence: why this command.")
+    path: str = Field("", description='The file or folder for "read_file" and "list_dir".')
+    explanation: str = Field("", description="One short sentence: why this step.")
     answer: str = Field("", description='The reply to the user when action is "answer".')
+
+
+def step_key(decision: Decision) -> str:
+    """How a decision is written in the step history, e.g. "ls -la" or "read_file README.md"."""
+    if decision.action == "run":
+        return clean_command(decision.command)
+    if decision.action in TOOL_ACTIONS:
+        return f"{decision.action} {decision.path.strip()}".strip()
+    return ""
+
+
+PERSONAS = {
+    "default": "",
+    "terse": "Keep answers to one short line. No pleasantries.",
+    "mentor": "Answer warmly, like a patient senior engineer, and mention one useful tip when it fits.",
+    "pirate": "Answer in a light pirate voice (keep commands and facts exact).",
+}
+
+
+@dataclass(frozen=True)
+class PromptContext:
+    """Per-session additions to the system prompt."""
+
+    persona: str = "default"
+    teach: bool = False
+    notes: tuple[str, ...] = field(default_factory=tuple)  # from `shellmate remember`
+
+    def render(self) -> str:
+        parts = []
+        if self.notes:
+            parts.append("Things the user asked you to remember:\n" + "\n".join(f"- {n}" for n in self.notes))
+        if PERSONAS.get(self.persona):
+            parts.append("Style: " + PERSONAS[self.persona])
+        if self.teach:
+            parts.append(
+                "Teaching mode: end every answer with one short line that explains the main command you "
+                "used and its flags, so the user learns it."
+            )
+        return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
 class Decider(Protocol):
@@ -116,11 +169,15 @@ def clean_command(command: str) -> str:
             return cmd
 
 
-def system_prompt(cwd: str) -> str:
+def system_prompt(cwd: str, context: PromptContext | None = None) -> str:
     os_name = "macOS" if platform.system() == "Darwin" else platform.system()
     shell = os.path.basename(os.environ.get("SHELL") or "/bin/sh")
     return SYSTEM_PROMPT.format(
-        os_name=os_name, shell=shell, cwd=cwd, os_rules=MACOS_RULES if os_name == "macOS" else ""
+        os_name=os_name,
+        shell=shell,
+        cwd=cwd,
+        os_rules=MACOS_RULES if os_name == "macOS" else "",
+        extras=(context or PromptContext()).render(),
     )
 
 
@@ -145,18 +202,21 @@ def observation(step: dict, *, full: bool) -> str:
 
 NEXT_STEP_HINT = (
     '\n\nIf this output answers "{request}", reply with action "answer" and tell the user what it '
-    "means in a sentence. Otherwise run a DIFFERENT command."
+    "means in a sentence. Otherwise take a DIFFERENT step."
 )
 
 
-def build_messages(request: str, steps: list[dict], *, cwd: str) -> list[tuple[str, str]]:
-    messages = [("system", system_prompt(cwd)), ("human", request)]
+def build_messages(
+    request: str, steps: list[dict], *, cwd: str, context: PromptContext | None = None
+) -> list[tuple[str, str]]:
+    messages = [("system", system_prompt(cwd, context)), ("human", request)]
     for i, step in enumerate(steps):
         latest = i == len(steps) - 1
         text = observation(step, full=i >= len(steps) - RECENT_STEPS_IN_FULL)
         if latest:
             text += NEXT_STEP_HINT.format(request=request)  # small models need the reminder right here
-        messages.append(("ai", f"run: {step['command']}"))
+        said = step["command"] if step["outcome"] == "tool" else f"run: {step['command']}"
+        messages.append(("ai", said))
         messages.append(("human", text))
     return messages
 
@@ -168,7 +228,7 @@ def repeated_command(command: str, steps: list[dict]) -> bool:
     what the command would print, so running it again after one is a real new step, not a repeat.
     """
     for step in reversed(steps):
-        if step["outcome"] != "ran":
+        if step["outcome"] not in {"ran", "tool"}:
             continue
         if step["command"] == command:
             return True
@@ -189,7 +249,7 @@ def answer_is_a_command(answer: str, steps: list[dict]) -> bool:
 
 
 REPEAT_NUDGE = (
-    "You already ran `{command}` and its output is above. Do not run it again. Reply with action "
+    "You already did `{command}` and its output is above. Do not do it again. Reply with action "
     '"answer" and tell the user, in a sentence, what that output means for "{request}".'
 )
 REFUSED_NUDGE = (

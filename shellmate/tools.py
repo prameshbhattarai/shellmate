@@ -1,10 +1,10 @@
 """Tools: the only actions the agent can take.
 
-Implemented in milestones 1 and 4. Guarantees each tool must keep:
-- ``run_command``: runs only after the risk gate, with a timeout, inside the working directory,
-  and returns truncated stdout/stderr plus the exit code (never raises on a failing command).
-- ``read_file`` / ``list_dir``: read-only, confined to the working directory.
-- ``last_error``: the most recent failed command and its stderr, from shellmate's own history.
+- ``run_command``: runs only after the risk gate, with a timeout, inside the working folder, and
+  returns capped stdout/stderr plus the exit code (never raises on a failing command).
+- ``read_file`` / ``list_dir``: read-only and confined to the working folder, so they need no
+  approval. They raise :class:`ToolError` with a message meant for the model.
+- ``history`` / ``last_error`` live in memory.py: they read shellmate's own command log.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass
 
 TIMEOUT_EXIT_CODE = 124  # same code GNU `timeout` uses
+START_FAILED_EXIT_CODE = 127  # what shells report for a command that could not be started
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,15 @@ def run_command(command: str, *, cwd: str, timeout_s: float, max_output_chars: i
     The command gets its own process group, so a timeout (or Ctrl-C in shellmate) kills the whole
     pipeline, not just the shell. Output is decoded as UTF-8 with bad bytes replaced.
     """
-    proc = subprocess.Popen(
+    try:
+        proc = _start(command, cwd)
+    except OSError as exc:  # the working folder is gone, the shell can't start ...
+        return CommandResult(command, START_FAILED_EXIT_CODE, "", f"shellmate: could not start the command: {exc}")
+    return _wait(proc, command, timeout_s=timeout_s, max_output_chars=max_output_chars)
+
+
+def _start(command: str, cwd: str) -> subprocess.Popen:
+    return subprocess.Popen(
         command,
         shell=True,
         executable=_shell(),
@@ -68,6 +77,9 @@ def run_command(command: str, *, cwd: str, timeout_s: float, max_output_chars: i
         errors="replace",
         start_new_session=True,  # own process group: Ctrl-C no longer reaches it, so we kill it ourselves
     )
+
+
+def _wait(proc: subprocess.Popen, command: str, *, timeout_s: float, max_output_chars: int) -> CommandResult:
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
         exit_code = proc.returncode
@@ -89,13 +101,56 @@ def run_command(command: str, *, cwd: str, timeout_s: float, max_output_chars: i
     return CommandResult(command, exit_code, stdout, stderr, truncated=out_cut or err_cut)
 
 
+class ToolError(Exception):
+    """A tool could not do what was asked; the message goes back to the model."""
+
+
+LIST_DIR_MAX_ENTRIES = 200
+READ_FILE_MAX_BYTES = 1_000_000  # never pull more than this into memory
+
+
+def _inside(path: str, cwd: str) -> str:
+    """Resolve ``path`` against ``cwd`` and refuse anything outside it (symlinks included)."""
+    root = os.path.realpath(cwd)
+    target = os.path.realpath(os.path.join(root, os.path.expanduser(path or ".")))
+    if os.path.commonpath([root, target]) != root:
+        raise ToolError(f"{path} is outside the current folder; tools only read inside {root}")
+    return target
+
+
 def read_file(path: str, *, cwd: str, max_chars: int) -> str:
-    raise NotImplementedError("read_file lands in milestone 4")
+    target = _inside(path, cwd)
+    if os.path.isdir(target):
+        raise ToolError(f"{path} is a folder; use list_dir")
+    try:
+        size = os.path.getsize(target)
+        with open(target, "rb") as f:
+            raw = f.read(READ_FILE_MAX_BYTES)
+    except FileNotFoundError:
+        raise ToolError(f"{path} does not exist") from None
+    except OSError as exc:
+        raise ToolError(f"can't read {path}: {exc.strerror}") from None
+    if b"\0" in raw[:8000]:
+        raise ToolError(f"{path} looks like a binary file")
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) <= max_chars and size <= len(raw):
+        return text
+    return text[:max_chars] + f"\n... [file continues: {size} bytes in all, showing the first {max_chars} chars]"
 
 
 def list_dir(path: str, *, cwd: str) -> list[str]:
-    raise NotImplementedError("list_dir lands in milestone 4")
-
-
-def last_error() -> CommandResult | None:
-    raise NotImplementedError("last_error lands in milestone 4")
+    """Entries of a folder, folders first and marked with a trailing /."""
+    target = _inside(path, cwd)
+    try:
+        with os.scandir(target) as it:
+            entries = [(not e.is_dir(), e.name + ("/" if e.is_dir() else "")) for e in it]
+    except FileNotFoundError:
+        raise ToolError(f"{path} does not exist") from None
+    except NotADirectoryError:
+        raise ToolError(f"{path} is a file; use read_file") from None
+    except OSError as exc:
+        raise ToolError(f"can't list {path}: {exc.strerror}") from None
+    names = [name for _, name in sorted(entries)]
+    if len(names) > LIST_DIR_MAX_ENTRIES:
+        names = names[:LIST_DIR_MAX_ENTRIES] + [f"... {len(names) - LIST_DIR_MAX_ENTRIES} more"]
+    return names

@@ -135,3 +135,177 @@ def test_repl_builds_the_graph_once(monkeypatch):
     result = invoke(monkeypatch, decider, [], "a\nb\nexit\n")
     assert "mate> first" in result.output and "mate> second" in result.output
     assert len(builds) == 1
+
+
+# --- explain ---------------------------------------------------------------------------------------
+
+def _request_sent(decider) -> str:
+    return decider.calls[0][1][1]
+
+
+def test_explain_text_argument(monkeypatch):
+    decider = ScriptedDecider(answer("A missing module: run pip install requests."))
+    result = invoke(monkeypatch, decider, ["explain", "ModuleNotFoundError: No module named 'requests'"])
+    assert "No module named 'requests'" in _request_sent(decider)
+    assert "mate> A missing module" in result.output
+
+
+def test_explain_piped_input(monkeypatch):
+    monkeypatch.setattr(cli, "_reattach_tty", lambda: None)
+    decider = ScriptedDecider(answer("ok"))
+    invoke(monkeypatch, decider, ["explain"], "make: *** No rule to make target 'build'.\n")
+    assert "No rule to make target" in _request_sent(decider)
+
+
+def test_explain_without_text_uses_last_error(monkeypatch):
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    decider = ScriptedDecider(answer("ok"))
+    invoke(monkeypatch, decider, ["explain"])
+    assert "last_error" in _request_sent(decider)
+
+
+# --- pause and resume ------------------------------------------------------------------------------
+
+def test_ctrl_c_at_the_prompt_pauses_and_resume_continues(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    decider = ScriptedDecider(run("mkdir made"), answer("made it"))
+    real_input = cli.console.input
+
+    def ctrl_c(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.console, "input", ctrl_c)
+    first = invoke(monkeypatch, decider, ["ask", "make a folder"])
+    assert "paused" in first.output and first.exit_code == cli.EXIT_INTERRUPTED
+    assert not (tmp_path / "made").exists()
+
+    monkeypatch.setattr(cli.console, "input", real_input)  # a new process, a new terminal session
+    second = invoke(monkeypatch, decider, ["resume"], "y\n")
+    assert "resuming" in second.output and "make a folder" in second.output
+    assert (tmp_path / "made").is_dir()
+    assert "mate> made it" in second.output
+
+    third = invoke(monkeypatch, decider, ["resume"])
+    assert "nothing is paused" in third.output
+
+
+def test_finished_runs_leave_no_checkpoints(monkeypatch, isolated_home):
+    import sqlite3
+
+    invoke(monkeypatch, ScriptedDecider(run("echo hi"), answer("ok")), ["ask", "x"])
+    conn = sqlite3.connect(isolated_home / "checkpoints.sqlite")
+    assert conn.execute("select count(*) from checkpoints").fetchone()[0] == 0
+
+
+# --- undo, history ---------------------------------------------------------------------------------
+
+def test_undo_reverses_the_last_change(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    invoke(monkeypatch, ScriptedDecider(run("mkdir made"), answer("made it")), ["ask", "x"], "y\n")
+    assert (tmp_path / "made").is_dir()
+    result = invoke(monkeypatch, ScriptedDecider(answer("unused")), ["undo"], "y\n")
+    assert "rmdir made" in result.output and not (tmp_path / "made").exists()
+    again = invoke(monkeypatch, ScriptedDecider(answer("unused")), ["undo"])
+    assert "nothing to undo" in again.output
+
+
+def test_undo_says_when_it_cannot(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "f.txt").write_text("x")
+    invoke(monkeypatch, ScriptedDecider(run("touch f.txt"), answer("ok")), ["ask", "x"], "y\n")
+    result = invoke(monkeypatch, ScriptedDecider(answer("unused")), ["undo"])
+    assert "can't undo" in result.output and result.exit_code == cli.EXIT_FAILED
+
+
+def test_history_command(monkeypatch):
+    invoke(monkeypatch, ScriptedDecider(run("echo logged"), answer("ok")), ["ask", "x"])
+    result = CliRunner().invoke(cli.app, ["history"])
+    assert "echo logged" in result.output
+
+
+# --- profile, persona, init ------------------------------------------------------------------------
+
+def test_remembered_notes_reach_the_prompt(monkeypatch):
+    runner = CliRunner()
+    assert "remembered" in runner.invoke(cli.app, ["remember", "my", "projects", "live", "in", "~/code"]).output
+    assert "1. my projects live in ~/code" in runner.invoke(cli.app, ["profile"]).output
+    decider = ScriptedDecider(answer("ok"))
+    invoke(monkeypatch, decider, ["ask", "x"])
+    assert "my projects live in ~/code" in decider.calls[0][0][1]
+    assert "forgot 1" in runner.invoke(cli.app, ["forget"]).output
+
+
+def test_persona_and_teach_flags(monkeypatch):
+    decider = ScriptedDecider(answer("ok"))
+    invoke(monkeypatch, decider, ["--persona", "terse", "--teach", "ask", "x"])
+    system = decider.calls[0][0][1]
+    assert "one short line" in system and "Teaching mode" in system
+
+
+def test_unknown_persona_is_rejected(monkeypatch):
+    result = invoke(monkeypatch, ScriptedDecider(answer("ok")), ["--persona", "yoda", "ask", "x"])
+    assert result.exit_code != 0
+
+
+def test_init_zsh(monkeypatch):
+    result = CliRunner().invoke(cli.app, ["init", "zsh"])
+    assert "bindkey '^G' _shellmate_widget" in result.output
+    assert CliRunner().invoke(cli.app, ["init", "fish"]).exit_code == cli.EXIT_FAILED
+
+
+def test_ctrl_c_while_editing_pauses(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    def ctrl_c(command):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_edit_line", ctrl_c)
+    result = invoke(monkeypatch, ScriptedDecider(run("mkdir made"), answer("x")), ["ask", "x"], "e\n")
+    assert "paused" in result.output and result.exit_code == cli.EXIT_INTERRUPTED
+
+
+def test_a_second_pause_drops_the_first_runs_checkpoints(monkeypatch, isolated_home):
+    import sqlite3
+
+    def ctrl_c(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.console, "input", ctrl_c)
+    invoke(monkeypatch, ScriptedDecider(run("mkdir one"), answer("x")), ["ask", "first"])
+    invoke(monkeypatch, ScriptedDecider(run("mkdir two"), answer("x")), ["ask", "second"])
+    conn = sqlite3.connect(isolated_home / "checkpoints.sqlite")
+    assert conn.execute("select count(distinct thread_id) from checkpoints").fetchone()[0] == 1
+
+
+def test_undo_of_a_commit_refuses_after_a_manual_commit(monkeypatch, tmp_path):
+    import subprocess
+
+    for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(key, "test")
+    for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(key, "test@example.com")
+    monkeypatch.chdir(tmp_path)
+    git = lambda *a: subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True)  # noqa: E731
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "first")
+    invoke(monkeypatch, ScriptedDecider(run("git commit -q --allow-empty -m wip"), answer("ok")), ["ask", "x"], "y\n")
+    git("commit", "-q", "--allow-empty", "-m", "by hand")
+    result = invoke(monkeypatch, ScriptedDecider(answer("unused")), ["undo"])
+    assert "can't undo it safely" in result.output and result.exit_code == cli.EXIT_FAILED
+
+
+def test_undo_of_a_commit_when_nothing_moved(monkeypatch, tmp_path):
+    import subprocess
+
+    for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(key, "test")
+    for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(key, "test@example.com")
+    monkeypatch.chdir(tmp_path)
+    git = lambda *a: subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, text=True)  # noqa: E731
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "first")
+    invoke(monkeypatch, ScriptedDecider(run("git commit -q --allow-empty -m wip"), answer("ok")), ["ask", "x"], "y\n")
+    result = invoke(monkeypatch, ScriptedDecider(answer("unused")), ["undo"], "yes\n")
+    assert "git reset --soft HEAD~1" in result.output
+    assert git("log", "-1", "--format=%s").stdout.strip() == "first"

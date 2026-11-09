@@ -36,6 +36,7 @@ CASES = {
         "pip install requests",
         "git checkout main",
         "git branch feature-x",
+        "rmdir old-logs",
     ],
     Risk.DANGER: [
         "rm -rf node_modules",
@@ -166,3 +167,9 @@ def test_throwaway_folders_in_home_are_only_danger(fake_home, command):
 def test_same_command_in_a_project_folder_is_only_danger(fake_home):
     project = fake_home + "/code/app"
     assert classify("rm -rf *", cwd=project).risk is Risk.DANGER
+
+
+def test_git_checkout_of_a_file_discards_changes(tmp_path):
+    (tmp_path / "README.md").write_text("x")
+    assert classify("git checkout README.md", cwd=str(tmp_path)).risk is Risk.DANGER
+    assert classify("git checkout main", cwd=str(tmp_path)).risk is Risk.CAUTION

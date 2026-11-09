@@ -22,5 +22,5 @@ jobs:
       # Unit tests never call the model, so CI needs no Ollama.
       - name: Test
         run: pytest -q
-      - name: Eval cases parse
-        run: python evals/run_evals.py
+      - name: Eval set is consistent (no model)
+        run: python evals/run_evals.py --check

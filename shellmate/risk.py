@@ -89,7 +89,7 @@ CAUTION_PROGRAMS = {
 
 DANGER_PROGRAMS = {
     "rm": "deletes files permanently (no trash)",
-    "rmdir": "deletes folders",
+    "rmdir": "removes empty folders",
     "mv": "moves or renames files (can overwrite the destination)",
     "chmod": "changes permissions",
     "chown": "changes file ownership",
@@ -222,6 +222,15 @@ def _is_precious_tree(target: str, base: str | None) -> bool:
     return resolved is not None and _is_precious_path(resolved)
 
 
+def _names_a_path(arg: str, base: str | None) -> bool:
+    """True when ``arg`` is an existing file or folder (relative to ``base``), not e.g. a branch name.
+    Unknown base: anything that looks like a path counts, to stay on the safe side."""
+    if base is None:
+        return "/" in arg or "." in arg
+    resolved = _resolve(arg, base)
+    return resolved is not None and os.path.lexists(resolved)
+
+
 def _strip_prefix(name: str, args: list[str]) -> list[str]:
     """Drop a prefix's own options (and their values) and return the command it runs."""
     short = SHORT_OPTIONS_WITH_VALUE.get(name, set())
@@ -284,7 +293,7 @@ GIT_SAFE = frozenset(
 GIT_CAUTION = frozenset("add commit fetch stash switch init mv restore merge cherry-pick tag notes".split())
 
 
-def _git(args: list[str]) -> RiskVerdict:
+def _git(args: list[str], base: str | None = None) -> RiskVerdict:
     i = 0  # skip global options like -C dir or --no-pager
     while i < len(args) and args[i].startswith("-"):
         if args[i] == "-c" or args[i].startswith(("--config-env", "--exec-path")):
@@ -322,6 +331,9 @@ def _git(args: list[str]) -> RiskVerdict:
     if sub == "checkout":
         if "--" in rest or "-f" in rest or "--force" in rest or "." in rest:
             return _v(Risk.DANGER, "discards uncommitted changes")
+        files = [t for t in _targets(rest) if _names_a_path(t, base)]
+        if files:  # `git checkout README.md` restores the file, throwing away its changes
+            return _v(Risk.DANGER, f"discards uncommitted changes to {files[0]}")
         return _v(Risk.CAUTION, "switches branch")
     if sub == "restore" and "--staged" not in rest:
         return _v(Risk.DANGER, "discards uncommitted changes")
@@ -415,6 +427,8 @@ def _program(prog: str, args: list[str], base: str | None) -> RiskVerdict:
         precious = [t for t in _targets(args) if _is_precious(t, base)]
         if precious and (name == "rmdir" or _is_recursive(args)):
             return _v(Risk.BLOCKED, f"{name} on {precious[0]} would wreck your system or home folder")
+        if name == "rmdir":
+            return _v(Risk.CAUTION, "removes folders, only if they are empty")
         return _v(Risk.DANGER, DANGER_PROGRAMS[name])
 
     if name == "mv":
@@ -439,7 +453,7 @@ def _program(prog: str, args: list[str], base: str | None) -> RiskVerdict:
         return _v(Risk.DANGER, "changes disks or volumes")
 
     if name == "git":
-        return _git(args)
+        return _git(args, base)
     if name in {"brew", "pip", "pip3", "npm", "pnpm", "yarn", "uv", "cargo", "gem"}:
         return _package_manager(name, args)
 
