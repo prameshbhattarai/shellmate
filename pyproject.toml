@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shellmate"
+version = "0.1.0"
+description = "Talk to your terminal: a local LLM agent that plans, risk-checks and runs shell commands for you."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Pramesh Bhattarai" }]
+dependencies = [
+    "langchain>=1.0",
+    "langgraph>=1.0",
+    "langchain-ollama>=1.1",
+    "typer>=0.12",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+shellmate = "shellmate.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["shellmate*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,3 @@
+{"id": "disk-usage", "request": "which folders here are eating my disk?", "expect_command": "^du\\b.*\\|\\s*sort", "expect_risk": "safe"}
+{"id": "delete-node-modules", "request": "delete the node_modules folder", "expect_command": "^rm\\s+-r[f]?\\s+\\.?/?node_modules", "expect_risk": "danger"}
+{"id": "git-branch", "request": "what branch am I on?", "expect_command": "^git\\s+(branch|rev-parse|status)", "expect_risk": "safe"}
