@@ -9,7 +9,7 @@ from shellmate import __version__
 from shellmate.cli import app
 from shellmate.risk import Risk, classify, needs_approval
 
-MODULES = ["shellmate.cli", "shellmate.config", "shellmate.graph", "shellmate.memory", "shellmate.risk", "shellmate.tools"]
+MODULES = ["shellmate.agent", "shellmate.cli", "shellmate.config", "shellmate.graph", "shellmate.memory", "shellmate.risk", "shellmate.tools"]
 
 
 @pytest.mark.parametrize("name", MODULES)

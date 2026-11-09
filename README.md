@@ -4,7 +4,7 @@
 commands, labels each one by risk, runs it after you approve, reads the output, and keeps going until
 the job is done. It runs on a local model (Qwen via Ollama), so nothing leaves your machine.
 
-> Status: skeleton. The CLI starts, nothing is wired to the model yet. See [Roadmap](#roadmap).
+> Status: working agent loop with a rule-based risk gate. Memory, extra tools and evals are next. See [Roadmap](#roadmap).
 
 ```
 $ shellmate
@@ -24,17 +24,24 @@ mate>   Your branch is behind origin. Run `git pull --rebase` then push again. D
 ## How it works
 
 ```
-understand -> propose_command -> classify_risk -> auto_run | ask_human -> run -> observe -> next_step | answer
+decide -> classify_risk -> run (SAFE) | ask_human (CAUTION / DANGER) | refuse (BLOCKED) -> decide ... -> answer
 ```
 
-- **Agent loop** in [LangGraph](https://langchain-ai.github.io/langgraph/), with a step cap and retries.
-- **Tools are the only way to act:** `run_command` (timeout, locked to the working directory, output
-  truncated), `read_file`, `list_dir`, `last_error`.
-- **Risk first, model second.** Rules flag `rm`, `sudo`, `mv`, redirects, `curl | sh`,
-  `git push --force` and friends before the model is asked. Anything unsure is treated as DANGER, and
-  DANGER always waits for your `y/n/edit`, whatever the model says.
-- **Memory:** remembers your OS, project and aliases across sessions (SQLite).
-- **Evals:** a set of requests with the expected command and risk label, scored in CI.
+- **Agent loop** in [LangGraph](https://langchain-ai.github.io/langgraph/): the model proposes one
+  command at a time, reads its output and picks the next step or answers, with a step cap.
+  Repeated commands are caught in code, not just in the prompt.
+- **The model only proposes.** It returns a structured `Decision` (run a command, or answer); the
+  graph runs it, and the only action available is `run_command`: timeout, no keyboard input, output
+  capped.
+- **Risk is decided by rules, never by the model.** Every command, including one you edited, is
+  labelled before it runs: SAFE runs, CAUTION asks `y/N`, DANGER needs the full word `yes`, and
+  BLOCKED (`rm -rf ~`, `curl | sh`, `dd` to a disk ...) never runs.
+- **Human-in-the-loop with `interrupt()`.** Approval pauses the graph and the CLI resumes it with
+  your answer, so any front end can drive the same agent.
+- Planned: file and history tools, memory across sessions (SQLite), evals scored in CI.
+
+**Full walkthrough with flowcharts: [docs/how-it-works.md](docs/how-it-works.md)** - the agent
+graph node by node, what the model sees, the approval pause, and the risk rules.
 
 ## Quick start
 
@@ -56,22 +63,24 @@ shellmate --help
 
 ```
 shellmate/
-  cli.py        # typer entrypoint, REPL, rich rendering
+  cli.py        # typer entrypoint, REPL, rich rendering, answers the graph's approval pauses
+  agent.py      # system prompt, Decision schema, how outputs are fed back, repeat guards
+  graph.py      # LangGraph state and nodes: decide, classify_risk, ask_human, run, refuse
+  risk.py       # rule-based risk classifier: SAFE / CAUTION / DANGER / BLOCKED
+  tools.py      # run_command (read_file, list_dir, last_error planned)
   config.py     # settings from env; builds the chat model lazily
-  graph.py      # LangGraph state, nodes, human-approval interrupt
-  tools.py      # run_command, read_file, list_dir, last_error
-  risk.py       # rule-based risk classifier (+ LLM fallback)
-  memory.py     # session checkpoints + user profile
+  memory.py     # session checkpoints + user profile (planned)
+docs/           # how-it-works.md: flowcharts of the agent, graph and risk rules
 evals/          # request -> expected command + risk, and the scorer
-tests/          # unit tests; never call the model
+tests/          # unit tests with a scripted fake model; never call Ollama
 ```
 
 ## Roadmap
 
 - [x] Skeleton: CLI, module layout, smoke tests, CI
-- [ ] One-shot: request -> one command -> confirm -> run -> print
-- [ ] Risk classifier with unit tests (pure Python)
-- [ ] LangGraph loop: observe output, decide next step, step cap, `interrupt()` approval
+- [x] One-shot: request -> one command -> confirm -> run -> print
+- [x] Risk classifier with unit tests (pure Python)
+- [x] LangGraph loop: observe output, decide next step, step cap, `interrupt()` approval
 - [ ] Tools for files, history, "explain last error"
 - [ ] Memory across sessions
 - [ ] Eval set (50 cases) + CI score badge; Qwen 3b vs 7b comparison table
