@@ -125,6 +125,11 @@ class Decider(Protocol):
 
 
 def build_decider(model: str | None = None) -> Decider:
+    from .replay import replay_decider
+
+    replay = replay_decider()  # SHELLMATE_REPLAY: scripted answers for demos, no model at all
+    if replay is not None:
+        return replay
     from .config import chat_model
 
     return chat_model(model).with_structured_output(Decision, method="json_schema")

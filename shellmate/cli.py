@@ -42,6 +42,7 @@ from .memory import (
     remember as remember_note,
     save_pending,
 )
+from .replay import replay_path
 from .risk import Risk, classify
 from .shell_init import SCRIPTS
 from .tools import run_command
@@ -502,7 +503,8 @@ def repl(opts: Options) -> None:
     settings = get_settings()
     graph = None  # built on the first request, then reused
     console.print(
-        f"[bold]shellmate[/bold] {__version__}  model={opts.model or settings.model}"
+        f"[bold]shellmate[/bold] {__version__}  "
+        f"{'model=replay (scripted answers)' if replay_path() else 'model=' + (opts.model or settings.model)}"
         f"{'  (dry run)' if opts.dry_run else ''}  -  type 'exit' to quit"
     )
     while True:

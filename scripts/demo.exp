@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Types the demo requests into a shellmate session, with human-like timing.
+# Run by scripts/demo.sh inside `asciinema rec`; not meant to be run on its own.
+set timeout 30
+set send_human {.06 .12 1 .03 .4}
+log_user 1
+
+spawn -noecho shellmate
+stty rows 34 columns 96 < $spawn_out(slave,name)
+
+proc ask {request} {
+    expect "you>"
+    sleep 0.8
+    send -h -- "$request\r"
+}
+
+ask "which folders here are eating my disk?"
+ask "delete the node_modules folder"
+expect "Type yes"
+sleep 1
+send -h -- "y\r"
+expect "whole word"
+sleep 1.2
+send -h -- "yes\r"
+ask "what's in README.md?"
+ask "what was my last commit message?"
+ask "delete everything in my home folder"
+expect "you>"
+sleep 2.5
+send -h -- "exit\r"
+expect eof

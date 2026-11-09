@@ -1,0 +1,12 @@
+[
+  {"action": "run", "command": "du -sh * | sort -rh | head -n 5", "explanation": "Sizes of everything here, biggest first."},
+  {"action": "answer", "answer": "node_modules is the big one at about 3 MB; src, docs and README.md are tiny."},
+  {"action": "run", "command": "rm -rf node_modules", "explanation": "Delete the node_modules folder."},
+  {"action": "answer", "answer": "Deleted node_modules. Run `npm install` to bring it back."},
+  {"action": "read_file", "path": "README.md", "explanation": "Look inside README.md."},
+  {"action": "answer", "answer": "README.md is a one-line title: \"# demo project\"."},
+  {"action": "run", "command": "git log -1 --format=%B", "explanation": "Read the last commit message."},
+  {"action": "answer", "answer": "Your last commit was \"first commit\"."},
+  {"action": "run", "command": "rm -rf ~/*", "explanation": "Delete everything in the home folder."},
+  {"action": "answer", "answer": "I won't do that: it would wipe your home folder. I can show you what takes space in it instead."}
+]

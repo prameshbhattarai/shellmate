@@ -6,9 +6,11 @@
 commands, labels each one by risk, runs it after you approve, reads the output, and keeps going until
 it can answer you. It runs on a local model (Qwen via Ollama), so nothing leaves your machine.
 
-<!-- Record with ./scripts/demo.sh, then uncomment:
 ![shellmate demo](docs/demo.gif)
--->
+
+*A replayed session: the model's answers are scripted ([scripts/demo_replay.json](scripts/demo_replay.json)),
+and everything else is real: the risk rules, the prompts, and the commands with their output.
+Re-record with `./scripts/demo.sh`, or `./scripts/demo.sh --live` against your own model.*
 
 ```text
 you> which folders here are eating my disk?
@@ -292,10 +294,10 @@ shellmate/
   undo.py        # inverse commands for `shellmate undo`
   shell_init.py  # zsh Ctrl-G binding
   config.py      # settings from env; builds the chat model lazily
-docs/            # how-it-works.md (flowcharts); demo.gif once recorded
+docs/            # how-it-works.md (flowcharts), demo.gif and its demo.cast
 evals/           # 55 cases and the scorer
-scripts/demo.sh  # records the demo GIF
-tests/           # 261 unit tests with a scripted fake model; never call Ollama
+scripts/         # demo.sh records the GIF (replay by default, --live for a real model)
+tests/           # 265 unit tests with a scripted fake model; never call Ollama
 ```
 
 ## Roadmap
@@ -307,7 +309,8 @@ tests/           # 261 unit tests with a scripted fake model; never call Ollama
 - [x] Memory across sessions: SQLite checkpoints, resume, notes
 - [x] Eval set (55 cases) and scorer; consistency check in CI
 - [x] Extras: personas, teach mode, `shellmate undo`, zsh key binding
-- [ ] Record the demo GIF (`./scripts/demo.sh`) and fill in the eval table
+- [x] Demo GIF (`./scripts/demo.sh`)
+- [ ] Fill in the eval table (`python evals/run_evals.py --model qwen2.5:3b,qwen2.5:7b`)
 
 ## License
 
