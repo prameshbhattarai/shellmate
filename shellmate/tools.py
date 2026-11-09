@@ -9,7 +9,11 @@ Implemented in milestones 1 and 4. Guarantees each tool must keep:
 
 from __future__ import annotations
 
+import os
+import subprocess
 from dataclasses import dataclass
+
+TIMEOUT_EXIT_CODE = 124  # same code GNU `timeout` uses
 
 
 @dataclass(frozen=True)
@@ -21,8 +25,35 @@ class CommandResult:
     truncated: bool = False
 
 
+def _truncate(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[:limit] + f"\n... [truncated {len(text) - limit} chars]", True
+
+
 def run_command(command: str, *, cwd: str, timeout_s: int, max_output_chars: int) -> CommandResult:
-    raise NotImplementedError("run_command lands in milestone 1")
+    """Run ``command`` in the user's shell. Never raises for a failing or hanging command."""
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            executable=shell,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,  # nothing may wait for keyboard input (it would hang until the timeout)
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        exit_code = TIMEOUT_EXIT_CODE
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = f"shellmate: command timed out after {timeout_s}s"
+
+    stdout, out_cut = _truncate(stdout, max_output_chars)
+    stderr, err_cut = _truncate(stderr, max_output_chars)
+    return CommandResult(command, exit_code, stdout, stderr, truncated=out_cut or err_cut)
 
 
 def read_file(path: str, *, cwd: str, max_chars: int) -> str:

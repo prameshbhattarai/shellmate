@@ -35,6 +35,6 @@ def test_repl_exits_on_exit():
 
 
 def test_unknown_commands_default_to_danger_and_need_approval():
-    verdict = classify("rm -rf /")
+    verdict = classify("some-tool-nobody-knows --do-it")
     assert verdict.risk is Risk.DANGER
     assert needs_approval(verdict)
