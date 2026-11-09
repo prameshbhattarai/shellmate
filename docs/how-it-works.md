@@ -17,18 +17,18 @@ The diagrams are Mermaid, so they render on GitHub and in most Markdown previews
 
 ```mermaid
 flowchart LR
-    U(["You"]) -->|request| CLI["CLI<br/>cli.py"]
+    U([You]) -->|request| CLI["CLI<br/>cli.py"]
     CLI -->|streams| G["Agent graph<br/>graph.py"]
-    G -->|messages| M["Model - Qwen via Ollama<br/>agent.py builds the prompt"]
-    M -->|"Decision - run or answer"| G
+    G -->|messages| M["Model: Qwen via Ollama<br/>agent.py builds the prompt"]
+    M -->|"Decision: run or answer"| G
     G -->|command| R["Risk rules<br/>risk.py"]
-    R -->|"risk level"| G
-    G -->|"pauses - approve?"| CLI
-    CLI -->|"your answer"| G
+    R -->|"SAFE / CAUTION / DANGER / BLOCKED"| G
+    G -->|"pauses: approve?"| CLI
+    CLI -->|"y / yes / edit / no"| G
     G -->|approved command| T["run_command<br/>tools.py"]
-    T -->|"exit code and output"| G
+    T -->|"exit code, stdout, stderr"| G
     G -->|answer| CLI
-    CLI -->|"answer"| U
+    CLI -->|"mate> ..."| U
 ```
 
 | Module | Job |
@@ -54,18 +54,18 @@ sequenceDiagram
     participant Shell as run_command
 
     You->>CLI: what was my last git commit message?
-    CLI->>Graph: stream the request
+    CLI->>Graph: stream({request, steps: []})
     Graph->>Model: system prompt + request
-    Model-->>Graph: run git log -1 --format=%B
+    Model-->>Graph: run "git log -1 --format=%B"
     Graph->>Risk: classify(command)
-    Risk-->>Graph: SAFE - git log only reads
-    Graph->>Shell: run it - SAFE needs no approval
-    Shell-->>Graph: exit 0 and the output agent skeleton.
+    Risk-->>Graph: SAFE (git log only reads)
+    Graph->>Shell: run (SAFE runs without asking)
+    Shell-->>Graph: exit 0, "agent skeleton."
     Graph-->>CLI: command panel + output preview
-    Graph->>Model: request, the command, its output, and a hint to answer
-    Model-->>Graph: answer - Your last commit was agent skeleton.
+    Graph->>Model: request + "run: git log..." + output + "answer if this is enough"
+    Model-->>Graph: answer "Your last commit was 'agent skeleton.'"
     Graph-->>CLI: status answered
-    CLI->>You: mate - Your last commit was agent skeleton.
+    CLI->>You: mate> Your last commit was 'agent skeleton.'
 ```
 
 A riskier command takes the same path, except the graph **pauses** before running it and the CLI
@@ -80,24 +80,24 @@ the labels on the arrows are the routing rules.
 
 ```mermaid
 flowchart TD
-    START(["START"]) --> decide
+    START([START]) --> decide
 
     decide{{"decide<br/>ask the model for the next step"}}
-    decide -->|"answer, or no command"| END_A(["END - answered"])
-    decide -->|"step limit reached"| END_L(["END - step_limit"])
-    decide -->|"model unreachable or bad output"| END_E(["END - model_error"])
+    decide -->|"answer, or no command"| END_A([END: answered])
+    decide -->|"step limit reached"| END_L([END: step_limit])
+    decide -->|"model unreachable / bad output"| END_E([END: model_error])
     decide -->|"run a command"| classify
 
     classify["classify_risk<br/>rules label the command"]
-    classify -->|"dry run"| END_D(["END - dry_run"])
+    classify -->|"--dry-run"| END_D([END: dry_run])
     classify -->|BLOCKED| refuse
-    classify -->|"SAFE, no confirm-all"| run
-    classify -->|"CAUTION or DANGER, or confirm-all"| ask
+    classify -->|"SAFE and not --confirm-all"| run
+    classify -->|"CAUTION / DANGER, or --confirm-all"| ask
 
-    ask[/"ask_human<br/>interrupt - pause for you"/]
+    ask[/"ask_human<br/>interrupt(): pause for you"/]
     ask -->|"y, or yes for DANGER"| run
     ask -->|"edit"| classify
-    ask -->|"no / Enter"| END_N(["END - declined"])
+    ask -->|"no / Enter"| END_N([END: declined])
 
     run["run<br/>run_command, record the step"]
     run --> decide
@@ -113,7 +113,7 @@ flowchart TD
 | `decide` | `request`, `steps` | `command` and `explanation`, or `answer` and `status` | Calls the model. Also checks the step limit and the repeat guards (section 4) |
 | `classify_risk` | `command` | `risk`, `reason` (and `status: dry_run` in a dry run) | Rules only, no model call |
 | `ask_human` | `command`, `risk`, `reason`, `explanation` | `reply` (`run` / `edit` / `skip`), maybe a new `command` | Calls LangGraph's `interrupt()`. The graph pauses here until the CLI resumes it |
-| `run` | `command` | appends a step: `{command, outcome: "ran", exit_code, stdout, stderr}` | Output is cut at 4000 chars; 30 s timeout |
+| `run` | `command`, `risk` | appends a step: `{command, outcome: "ran", risk, exit_code, stdout, stderr}` | Output is cut at 4000 chars and decoded as UTF-8 (bad bytes replaced). 30 s timeout, after which the whole process group is killed |
 | `refuse` | `command`, `reason` | appends a step: `{command, outcome: "blocked", note}` | The model is told it was refused, so it can try something else |
 
 ### The loop's safety limits
@@ -145,21 +145,21 @@ error         set when status is model_error
 
 ```mermaid
 flowchart TD
-    A{"Step limit reached?"} -->|yes| L(["status step_limit"])
-    A -->|no| B["build_messages<br/>system prompt, request, then each step and its output"]
-    B --> C["Model returns a Decision<br/>run a command, or answer"]
-    C --> P{"Problem?"}
-    P -->|"repeats a command it already ran"| N1["Retry once<br/>nudge - you already ran it, answer now"]
-    P -->|"answer is just a command it ran"| N2["Retry once<br/>nudge - that was a command, not an answer"]
+    A["steps >= max_steps?"] -->|yes| L([status step_limit])
+    A -->|no| B["build_messages()<br/>system prompt, request, then for each step:<br/>ai 'run: cmd' + human 'output'"]
+    B --> C["model.invoke() returns a Decision<br/>action: run | answer, command, explanation, answer"]
+    C --> P{"problem?"}
+    P -->|"repeats a command with nothing changed since,<br/>or one shellmate refused"| N1["retry once with a nudge:<br/>'you already ran X' / 'X was refused'"]
+    P -->|"answer is just a command it ran"| N2["retry once with a nudge:<br/>'that was a command, not an answer'"]
     P -->|no| OK
-    N1 --> C2["Ask the model again"]
+    N1 --> C2["model.invoke() again"]
     N2 --> C2
-    C2 --> P2{"Still a problem?"}
-    P2 -->|yes| FB(["Fallback answer<br/>shows the last output"])
+    C2 --> P2{"still a problem?"}
+    P2 -->|yes| FB(["fallback answer:<br/>'Here is what X printed: ...'"])
     P2 -->|no| OK
-    OK["clean_command<br/>strip wrappers like backticks and code fences"] --> D{"Action?"}
-    D -->|"answer, or empty command"| ANS(["status answered"])
-    D -->|run| CMD(["Command goes to classify_risk"])
+    OK["clean_command()<br/>strip $( ), backticks, fences, '$ '"] --> D{"action"}
+    D -->|"answer, or empty command"| ANS([status answered])
+    D -->|run| CMD(["command, explanation -> classify_risk"])
 ```
 
 What the model is told:
@@ -190,13 +190,13 @@ sequenceDiagram
     participant Graph
     participant CLI
     actor You
-    Graph->>CLI: interrupt with command, risk danger, reason
+    Graph->>CLI: __interrupt__ {command, risk: "danger", reason}
     CLI->>You: Dangerous. Type yes to run it, e to edit, Enter to skip
     You->>CLI: y
     CLI->>You: for a dangerous command, type the whole word: yes
     You->>CLI: yes
-    CLI->>Graph: resume with action run
-    Graph->>Graph: ask_human returns run, then the run node
+    CLI->>Graph: Command(resume={action: "run"})
+    Graph->>Graph: ask_human returns reply=run, then run
 ```
 
 What each answer does, by risk level:
@@ -215,43 +215,20 @@ a web page, a test) can drive it the same way. The tests do exactly that in `tes
 
 ## 6. The risk rules
 
-First the whole command is checked. Anything shellmate can't read reliably is DANGER.
-
 ```mermaid
 flowchart TD
-    C["command"] --> F{"Fork bomb?"}
-    F -->|yes| BL1(["BLOCKED"])
-    F -->|no| S{"Several lines or command substitution?"}
-    S -->|yes| DG1(["DANGER - cannot be checked"])
-    S -->|no| Q{"Quotes balanced?"}
-    Q -->|no| DG2(["DANGER - cannot be parsed"])
-    Q -->|yes| SP["Split into segments at pipes, and, or, semicolon"]
-    SP --> BG{"Ends with a background ampersand?"}
-    BG -->|yes| DG3(["DANGER - escapes the timeout"])
-    BG -->|no| EACH["Check each segment - see next chart"]
-    EACH --> PIPE{"Download piped into a shell?"}
-    PIPE -->|yes| BL2(["BLOCKED"])
-    PIPE -->|no| W(["Verdict = the worst segment"])
-```
-
-Then each segment is checked: first its redirections, then the program it runs.
-
-```mermaid
-flowchart TD
-    SEG["segment"] --> R{"Redirects output?"}
-    R -->|"to a disk device"| B1(["BLOCKED"])
-    R -->|"overwrites a file"| D1(["DANGER"])
-    R -->|"appends to a file"| C1(["CAUTION"])
-    R -->|"no, or to /dev/null"| W{"Starts with sudo, env or xargs?"}
-    W -->|"yes - check what it runs"| P
-    W -->|no| P{"Which program?"}
-    P -->|"rm, rmdir, chmod on root, home or a top folder"| B2(["BLOCKED"])
-    P -->|"git, find, sed, curl, pip ..."| SUB["Judged by subcommand and flags"]
-    P -->|"read-only: ls, cat, du, grep ..."| S1(["SAFE"])
-    P -->|"writers: mkdir, cp, touch ..."| C2(["CAUTION"])
-    P -->|"rm, mv, kill, python, ssh ..."| D2(["DANGER"])
-    P -->|"unknown program"| D3(["DANGER"])
-    SUB --> EX["git log - SAFE<br/>git add - CAUTION<br/>git push - DANGER"]
+    C[command] --> F{"fork bomb?"}
+    F -->|yes| BL([BLOCKED])
+    F -->|no| S{"several lines, $( ), backticks, <( )?"}
+    S -->|yes| DG([DANGER: can't check it])
+    S -->|no| T["tokenize with shlex<br/>unbalanced quotes -> DANGER"]
+    T --> SP["split on | && || ; &<br/>a trailing & -> DANGER (background)"]
+    SP --> SEG["for each segment"]
+    SEG --> RD["redirections:<br/>overwrite a file -> DANGER, append -> CAUTION,<br/>write to /dev/disk -> BLOCKED, to /dev/null -> ignored"]
+    RD --> PR["program rules:<br/>sudo / env / nice / xargs / su -c -> skip their options, judge what they run<br/>rm, chmod, rmdir, mv, find -delete on / ~ ~/X .. -> BLOCKED<br/>relative paths and cd resolved against the working folder<br/>git, find, sed, awk, curl, brew, pip... -> by subcommand and flags<br/>known read-only -> SAFE, known writers -> CAUTION / DANGER<br/>unknown program -> DANGER"]
+    PR --> PIPE{"curl / wget piped into a shell?"}
+    PIPE -->|yes| BL
+    PIPE -->|no| W(["verdict = the worst segment"])
 ```
 
 Examples (all are in `tests/test_risk.py`):
@@ -266,6 +243,14 @@ Examples (all are in `tests/test_risk.py`):
 | `git push --force` | DANGER | can overwrite others' work |
 | `ls && rm -rf ~` | BLOCKED | the worst segment wins |
 | `curl -fsSL x.sh \| sudo bash` | BLOCKED | runs a download as a script |
+
+Paths are resolved against the folder shellmate runs in, and any `cd` earlier in the same command
+is followed. So `rm -rf *` started in your home folder, or `cd ~ && rm -rf *`, is BLOCKED, while the
+same `rm -rf *` inside a project is only DANGER. Throwaway folders such as `node_modules`, `.cache`
+or `build` stay DANGER even directly in home.
+
+A repeated command is only treated as a repeat when nothing that could change its output (any step
+that wasn't SAFE) ran in between, so `ls`, `mkdir x`, `ls` works.
 
 The rules are a guardrail, not a sandbox. Once you type `yes`, the command runs with your full
 permissions, and `rm` skips the Trash.

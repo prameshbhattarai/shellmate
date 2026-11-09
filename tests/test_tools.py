@@ -1,3 +1,5 @@
+import time
+
 from shellmate.tools import TIMEOUT_EXIT_CODE, run_command
 
 
@@ -26,3 +28,21 @@ def test_times_out_without_raising(tmp_path):
 def test_commands_get_no_keyboard_input(tmp_path):
     result = run_command("cat", cwd=str(tmp_path), timeout_s=5, max_output_chars=100)
     assert result.exit_code == 0  # would hang until the timeout if stdin were the terminal
+
+
+def test_binary_output_does_not_raise(tmp_path):
+    result = run_command("printf '\\377\\376ok'", cwd=str(tmp_path), timeout_s=5, max_output_chars=100)
+    assert result.exit_code == 0 and result.stdout.endswith("ok")
+
+
+def test_timeout_kills_the_whole_pipeline(tmp_path):
+    marker = tmp_path / "still-running"
+    result = run_command(f"(sleep 1.5; touch {marker}) | cat", cwd=str(tmp_path), timeout_s=0.5, max_output_chars=100)
+    assert result.exit_code == TIMEOUT_EXIT_CODE
+    time.sleep(1.5)
+    assert not marker.exists(), "a pipeline member kept running after the timeout"
+
+
+def test_missing_shell_falls_back_to_sh(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/no/such/shell")
+    assert run_command("echo ok", cwd=str(tmp_path), timeout_s=5, max_output_chars=100).stdout == "ok\n"

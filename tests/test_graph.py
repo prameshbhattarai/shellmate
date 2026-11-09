@@ -88,7 +88,8 @@ def test_edit_is_checked_again_blocked(settings, tmp_path):
     decider = ScriptedDecider(run("mkdir made"), answer("ok"))
     state, asked = drive(decider, settings, tmp_path, replies=[{"action": "edit", "command": "rm -rf /"}])
     assert len(asked) == 1
-    assert state["steps"][0] == {"command": "rm -rf /", "outcome": "blocked", "note": state["steps"][0]["note"]}
+    step = state["steps"][0]
+    assert (step["command"], step["outcome"]) == ("rm -rf /", "blocked")
     assert not (tmp_path / "made").exists()
 
 
@@ -164,3 +165,37 @@ def test_latest_output_carries_the_next_step_hint(settings, tmp_path):
     decider = ScriptedDecider(run("echo one"), answer("ok"))
     drive(decider, settings, tmp_path)
     assert 'reply with action "answer"' in decider.last_message()
+
+
+def test_same_command_may_run_again_after_a_change(settings, tmp_path):
+    decider = ScriptedDecider(run("ls"), run("mkdir made"), run("ls"), answer("made is there now"))
+    state, _ = drive(decider, settings, tmp_path, replies=[{"action": "run"}])
+    assert [s["command"] for s in state["steps"]] == ["ls", "mkdir made", "ls"]
+    assert "made" in state["steps"][2]["stdout"]
+
+
+def test_refused_command_proposed_again_gets_a_refusal_nudge(settings, tmp_path):
+    decider = ScriptedDecider(run("rm -rf ~"), run("rm -rf ~"), answer("I can't do that safely"))
+    state, _ = drive(decider, settings, tmp_path)
+    assert len(state["steps"]) == 1
+    assert "already refused" in decider.last_message()
+    assert state["answer"] == "I can't do that safely"
+
+
+def test_model_that_insists_on_a_refused_command_is_stopped(settings, tmp_path):
+    decider = ScriptedDecider(run("rm -rf ~"))
+    state, _ = drive(decider, settings, tmp_path)
+    assert state["status"] == "answered" and "won't run `rm -rf ~`" in state["answer"]
+
+
+def test_risk_uses_the_graph_working_folder(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))  # the graph runs in the home folder
+    decider = ScriptedDecider(run("rm -rf *"), answer("refused"))
+    state, asked = drive(decider, settings, tmp_path)
+    assert asked == [] and state["steps"][0]["outcome"] == "blocked"
+
+
+def test_steps_record_their_risk(settings, tmp_path):
+    decider = ScriptedDecider(run("ls"), run("mkdir made"), answer("ok"))
+    state, _ = drive(decider, settings, tmp_path, replies=[{"action": "run"}])
+    assert [s["risk"] for s in state["steps"]] == ["safe", "caution"]

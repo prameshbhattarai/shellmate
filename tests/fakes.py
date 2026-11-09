@@ -14,7 +14,7 @@ def answer(text: str) -> Decision:
 
 
 class ScriptedDecider:
-    """Returns the given decisions in order; the last one repeats. An Exception in the list is raised."""
+    """Returns the given decisions in order; the last one repeats. An exception in the list is raised."""
 
     def __init__(self, *decisions):
         self.decisions = list(decisions)
@@ -23,7 +23,7 @@ class ScriptedDecider:
     def invoke(self, messages):
         self.calls.append(messages)
         item = self.decisions.pop(0) if len(self.decisions) > 1 else self.decisions[0]
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):
             raise item
         return item
 

@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from . import __version__
-from .agent import Decider, build_decider
+from .agent import build_decider
 from .config import Settings, get_settings
 from .graph import build_graph
 from .risk import Risk
@@ -39,6 +39,7 @@ RISK_STYLE = {
 # Exit codes for `shellmate ask`.
 EXIT_OK = 0
 EXIT_FAILED = 1  # model unreachable, or the step limit hit before an answer
+EXIT_INTERRUPTED = 130  # Ctrl-C, as shells report it
 
 # The model reads the full output and answers; the user sees only the start of it unless --verbose.
 PREVIEW_LINES = 6
@@ -73,10 +74,11 @@ def ask(
 ) -> None:
     """Work on REQUEST step by step, asking before anything risky, then answer and exit."""
     opts = ctx.obj or {}
+    settings = get_settings()
     code = handle_request(
         request,
-        decider=build_decider(opts.get("model")),
-        settings=get_settings(),
+        graph=build_session_graph(opts.get("model"), settings),
+        settings=settings,
         dry_run=opts.get("dry_run", False),
         confirm_all=opts.get("confirm_all", False),
         verbose=opts.get("verbose", False),
@@ -136,14 +138,19 @@ def _ask_user(request: dict) -> dict:
         else "[bold]Run it?[/bold] [y/N/e(dit)] "
     )
     while True:
-        answer = console.input(prompt).strip().lower()
+        try:
+            answer = console.input(prompt).strip().lower()
+            if answer in {"e", "edit"}:
+                edited = typer.prompt("command", default=request["command"]).strip()
+                return {"action": "edit", "command": edited} if edited else {"action": "skip"}
+        except (EOFError, KeyboardInterrupt, typer.Abort):
+            # Ctrl-C, Ctrl-D or no terminal (piped input): never run, just skip this command
+            console.print()
+            return {"action": "skip"}
         if answer == "yes" or (answer == "y" and not danger):
             return {"action": "run"}
         if answer in {"", "n", "no"}:
             return {"action": "skip"}
-        if answer in {"e", "edit"}:
-            edited = typer.prompt("command", default=request["command"]).strip()
-            return {"action": "edit", "command": edited} if edited else {"action": "skip"}
         if danger and answer == "y":
             console.print("for a dangerous command, type the whole word: yes")
             continue
@@ -152,37 +159,45 @@ def _ask_user(request: dict) -> dict:
 
 # --- the loop ------------------------------------------------------------------------------------
 
+def build_session_graph(model: str | None, settings: Settings):
+    """One compiled graph per session; each request gets its own thread on it."""
+    return build_graph(build_decider(model), settings=settings, cwd=os.getcwd())
+
+
 def handle_request(
     request: str,
     *,
-    decider: Decider,
+    graph,
     settings: Settings,
     dry_run: bool,
     confirm_all: bool = False,
     verbose: bool = False,
 ) -> int:
     """Run the agent on one request, drawing each step. Returns the exit code for `ask`."""
-    graph = build_graph(decider, settings=settings, cwd=os.getcwd())
     config = {"configurable": {"thread_id": uuid.uuid4().hex}, "recursion_limit": 10 * settings.max_steps + 10}
     payload: dict | Command = {"request": request, "dry_run": dry_run, "confirm_all": confirm_all, "steps": []}
 
     seen: dict = {}  # latest value of each state key, merged from the stream (steps aside)
-    while True:
-        pending = None
-        with console.status("thinking...") as status:
-            for chunk in graph.stream(payload, config, stream_mode="updates"):
-                for node, update in chunk.items():
-                    if node == "__interrupt__":
-                        pending = update[0].value
-                        continue
-                    if update:
-                        seen.update({k: v for k, v in update.items() if k != "steps"})
-                    status.stop()  # don't let the spinner draw over output
-                    _render(node, update, seen, verbose)
-                    status.start()
-        if pending is None:
-            break
-        payload = Command(resume=_ask_user(pending))
+    try:
+        while True:
+            pending = None
+            with console.status("thinking...") as status:
+                for chunk in graph.stream(payload, config, stream_mode="updates"):
+                    for node, update in chunk.items():
+                        if node == "__interrupt__":
+                            pending = update[0].value
+                            continue
+                        if update:
+                            seen.update({k: v for k, v in update.items() if k != "steps"})
+                        status.stop()  # don't let the spinner draw over output
+                        _render(node, update, seen, verbose)
+                        status.start()
+            if pending is None:
+                break
+            payload = Command(resume=_ask_user(pending))
+    except KeyboardInterrupt:  # while the model thinks or a command runs (run_command kills it)
+        console.print("\n[yellow]interrupted[/yellow]")
+        return EXIT_INTERRUPTED
 
     final = graph.get_state(config).values
     status = final.get("status")
@@ -204,7 +219,7 @@ def handle_request(
 
 def repl(model: str | None, dry_run: bool, confirm_all: bool = False, verbose: bool = False) -> None:
     settings = get_settings()
-    decider: Decider | None = None
+    graph = None  # built on the first request, then reused
     console.print(
         f"[bold]shellmate[/bold] {__version__}  model={model or settings.model}"
         f"{'  (dry run)' if dry_run else ''}  -  type 'exit' to quit"
@@ -218,9 +233,9 @@ def repl(model: str | None, dry_run: bool, confirm_all: bool = False, verbose: b
         if line in {"exit", "quit"}:
             break
         if line:
-            decider = decider or build_decider(model)
+            graph = graph or build_session_graph(model, settings)
             handle_request(
-                line, decider=decider, settings=settings, dry_run=dry_run, confirm_all=confirm_all, verbose=verbose
+                line, graph=graph, settings=settings, dry_run=dry_run, confirm_all=confirm_all, verbose=verbose
             )
 
 

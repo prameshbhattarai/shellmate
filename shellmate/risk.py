@@ -130,6 +130,28 @@ INTERPRETERS = frozenset(
 WRAPPERS = frozenset("env nohup time nice command builtin xargs caffeinate".split())
 PRIVILEGE = frozenset("sudo doas su".split())
 
+# Options of those prefixes that take a value, so the value is not mistaken for the program:
+# `sudo -u root rm -rf /` runs rm, not a program called "root".
+SHORT_OPTIONS_WITH_VALUE = {
+    "sudo": set("ugChpDrtTU"),
+    "doas": set("uC"),
+    "su": set("lsc"),
+    "nice": set("n"),
+    "env": set("uCS"),
+    "xargs": set("IJLnPsEdaR"),
+    "caffeinate": set("tw"),
+}
+LONG_OPTIONS_WITH_VALUE = {
+    "sudo": {"--user", "--group", "--host", "--prompt", "--chdir", "--close-from", "--role", "--type",
+             "--other-user", "--command-timeout"},
+    "env": {"--unset", "--chdir", "--split-string"},
+    "nice": {"--adjustment"},
+    "xargs": {"--max-args", "--replace", "--max-procs", "--delimiter", "--arg-file", "--eof", "--max-lines",
+              "--max-chars"},
+}
+# Options whose value is itself a command line: `su -c "rm -rf ~"`, `env -S "rm -rf ~"`.
+COMMAND_STRING_OPTIONS = {"su": {"-c", "--command"}, "env": {"-S", "--split-string"}}
+
 SEPARATORS = frozenset({"|", "||", "&&", ";", "&", "|&", "(", ")", ";;"})
 OVERWRITE_REDIRECTS = frozenset({">", ">|", "&>"})
 APPEND_REDIRECTS = frozenset({">>", "&>>"})
@@ -141,31 +163,103 @@ RAW_DEVICE = re.compile(r"/dev/(r?disk\d|sd[a-z]|nvme\d|hd[a-z])")
 
 # --- paths ----------------------------------------------------------------------------------------
 
-def _is_precious(target: str) -> bool:
-    """True for paths whose recursive deletion would wreck the machine or the user's files:
-    /, a top-level folder, the home folder or a folder directly in it, the current folder or above.
-    """
+def _resolve(target: str, base: str | None) -> str | None:
+    """``target`` as an absolute, normalised path, or None when it can't be known (a variable, an
+    unknown working folder). Expands ~ and $HOME; a trailing /* or a bare * means the folder itself."""
     t = target.strip()
     if not t:
-        return False
+        return None
     home = os.path.expanduser("~")
     for prefix in ("${HOME}", "$HOME"):
         if t.startswith(prefix):
             t = home + t[len(prefix):]
     t = os.path.expanduser(t)
     while t.endswith("/*") or (t.endswith("/") and t != "/"):
-        t = t[:-2] if t.endswith("/*") else t[:-1]
-    if t in {"", "/", ".", ".."} or t.startswith("../"):
-        return True
+        t = (t[:-2] or "/") if t.endswith("/*") else t[:-1]  # "/*" is the root, not ""
+    if t in {"", "*"}:
+        t = "."
+    if "$" in t:
+        return None
     if not t.startswith("/"):
-        return False  # a path inside the current folder, e.g. node_modules or ./build
-    path = PurePosixPath(os.path.normpath(t))
-    home_path = PurePosixPath(home)
-    if len(path.parts) <= 2:  # "/" or a top-level folder like /Users, /usr, /System
+        if base is None:
+            return None
+        t = os.path.join(base, t)
+    return os.path.normpath(t)
+
+
+# Regenerable folders that are fine to delete even when they sit directly in the home folder.
+DISPOSABLE_FOLDERS = frozenset(
+    "node_modules __pycache__ .cache .npm .pytest_cache .mypy_cache .venv venv build dist target tmp .tmp".split()
+)
+
+
+def _is_precious_path(path: str) -> bool:
+    """/, a top-level folder, the home folder, an ancestor of it, or a folder directly in it."""
+    p = PurePosixPath(path)
+    home = PurePosixPath(os.path.expanduser("~"))
+    if len(p.parts) <= 2:  # "/" or a top-level folder like /Users, /usr, /System
         return True
-    if path == home_path or home_path.is_relative_to(path):
+    if p == home or home.is_relative_to(p):
         return True
-    return path.is_relative_to(home_path) and len(path.relative_to(home_path).parts) <= 1
+    # a folder directly in home (Documents, Desktop, .ssh ...), unless it is a known throwaway one
+    return p.parent == home and p.name not in DISPOSABLE_FOLDERS
+
+
+def _is_precious(target: str, base: str | None) -> bool:
+    """True when wiping ``target`` would wreck the machine or the user's files. ``.`` and ``..``
+    always count (deleting the folder you are in, or above it); other relative paths are resolved
+    against ``base``, the folder the command runs in, so `rm -rf *` from ~ counts too."""
+    t = target.strip().rstrip("/") or target.strip()
+    if t in {".", "..", "./*", "../*"} or t.startswith("../"):
+        return True
+    resolved = _resolve(target, base)
+    return resolved is not None and _is_precious_path(resolved)
+
+
+def _is_precious_tree(target: str, base: str | None) -> bool:
+    """Like :func:`_is_precious`, but `.` is just the working folder (for find, mv ...)."""
+    resolved = _resolve(target, base)
+    return resolved is not None and _is_precious_path(resolved)
+
+
+def _strip_prefix(name: str, args: list[str]) -> list[str]:
+    """Drop a prefix's own options (and their values) and return the command it runs."""
+    short = SHORT_OPTIONS_WITH_VALUE.get(name, set())
+    long = LONG_OPTIONS_WITH_VALUE.get(name, set())
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if name in {"env", "sudo"} and re.match(r"^[A-Za-z_]\w*=", a):
+            i += 1  # env FOO=1 cmd
+            continue
+        if a.startswith("--"):
+            i += 2 if (a.split("=", 1)[0] in long and "=" not in a) else 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            consumed = 1
+            for j, ch in enumerate(a[1:]):
+                if ch in short:
+                    consumed = 2 if j == len(a) - 2 else 1  # value is the next token, or attached
+                    break
+            i += consumed
+            continue
+        break
+    return args[i:]
+
+
+def _command_string(name: str, args: list[str]) -> str | None:
+    """The command line passed as a string to `su -c` / `env -S`, if any."""
+    opts = COMMAND_STRING_OPTIONS.get(name, set())
+    for i, a in enumerate(args):
+        key, _, attached = a.partition("=")
+        if key in opts:
+            return attached or (args[i + 1] if i + 1 < len(args) else "")
+        if a.startswith("-") and not a.startswith("--") and len(a) > 2 and a[:2] in opts:
+            return a[2:]
+    return None
 
 
 def _is_recursive(args: list[str]) -> bool:
@@ -193,10 +287,17 @@ GIT_CAUTION = frozenset("add commit fetch stash switch init mv restore merge che
 def _git(args: list[str]) -> RiskVerdict:
     i = 0  # skip global options like -C dir or --no-pager
     while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in {"-C", "-c"} else 1
+        if args[i] == "-c" or args[i].startswith(("--config-env", "--exec-path")):
+            # `git -c core.pager='rm -rf ~' log` runs any command it is given
+            return _v(Risk.DANGER, "git -c can make git run arbitrary commands")
+        i += 2 if args[i] == "-C" else 1
     if i >= len(args):
         return _v(Risk.SAFE, "git with no subcommand")
     sub, rest = args[i], args[i + 1:]
+    if any(a == "--output" or a.startswith("--output=") for a in rest):
+        return _v(Risk.DANGER, f"git {sub} --output overwrites a file")
+    if sub == "reflog" and rest[:1] in (["expire"], ["delete"]):
+        return _v(Risk.DANGER, "throws away the reflog, the usual way to recover lost commits")
     if sub in GIT_SAFE:
         return _v(Risk.SAFE, f"git {sub} only reads")
     if sub == "branch":
@@ -254,27 +355,74 @@ def _package_manager(prog: str, args: list[str]) -> RiskVerdict:
     return _v(Risk.DANGER, f"{prog} {sub} may remove packages or run scripts")
 
 
-def _program(prog: str, args: list[str]) -> RiskVerdict:
+SED_WRITE_OR_EXEC = re.compile(r"(^|[;}/\s])[wWe](\s|$)")
+
+
+def _short_flags(args: list[str]) -> str:
+    return "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+
+
+def _writes_despite_being_read_only(name: str, args: list[str]) -> str | None:
+    """Read-only programs that still write files with some flags. Returns why, or None."""
+    if name == "sort" and ("o" in _short_flags(args) or any(a.split("=")[0] == "--output" for a in args)):
+        return "sort -o overwrites a file"
+    if name == "tree" and "o" in _short_flags(args):
+        return "tree -o writes a file"
+    if name == "say" and ("o" in _short_flags(args) or any(a.split("=")[0] == "--output-file" for a in args)):
+        return "say -o writes an audio file"
+    if name == "file" and "C" in _short_flags(args):
+        return "file -C writes a magic file"
+    if name == "uniq":
+        positional, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+            elif a in {"-f", "-s"}:
+                skip = True  # these take a number
+            elif not a.startswith("-") or a == "-":
+                positional.append(a)
+        if len(positional) >= 2:
+            return f"uniq writes its output to {positional[1]}"
+    return None
+
+
+def _program(prog: str, args: list[str], base: str | None) -> RiskVerdict:
+    """Judge one program and its arguments. ``base`` is the folder it runs in (None if unknown)."""
     name = os.path.basename(prog)
 
-    if name in PRIVILEGE:
-        inner = _segment(args) if args else _v(Risk.DANGER, "opens a root shell")
+    if name in PRIVILEGE or name in WRAPPERS:
+        if name == "command" and args[:1] in (["-v"], ["-V"]):
+            return _v(Risk.SAFE, "prints where a command is")
+        script = _command_string(name, args)
+        if script is not None:
+            inner = classify(script, cwd=base)
+        else:
+            rest = _strip_prefix(name, args)
+            if not rest:
+                if name in PRIVILEGE:
+                    return _v(Risk.DANGER, "opens a root shell")
+                return _v(Risk.SAFE, f"{name} only prints")
+            inner = _segment(rest, base)
         if inner.risk is Risk.BLOCKED:
             return inner
-        return _v(Risk.DANGER, f"runs as administrator ({inner.reason})")
-
-    if name in WRAPPERS:
-        rest = list(args)
-        while rest and (rest[0].startswith("-") or (name == "xargs" and rest[0].isdigit())
-                        or re.match(r"^\w+=", rest[0])):
-            rest.pop(0)
-        return _segment(rest) if rest else _v(Risk.SAFE, f"{name} only prints")
+        if name in PRIVILEGE:
+            return _v(Risk.DANGER, f"runs as administrator ({inner.reason})")
+        if script is not None:
+            return _worst([inner, _v(Risk.DANGER, f"{name} runs a command given as a string")])
+        return inner
 
     if name in {"rm", "rmdir", "chmod", "chown", "chgrp"}:
-        precious = [t for t in _targets(args) if _is_precious(t)]
+        precious = [t for t in _targets(args) if _is_precious(t, base)]
         if precious and (name == "rmdir" or _is_recursive(args)):
             return _v(Risk.BLOCKED, f"{name} on {precious[0]} would wreck your system or home folder")
         return _v(Risk.DANGER, DANGER_PROGRAMS[name])
+
+    if name == "mv":
+        sources = _targets(args)[:-1]
+        precious = [t for t in sources if _is_precious(t, base)]
+        if precious:
+            return _v(Risk.BLOCKED, f"moving {precious[0]} would break your system or home folder")
+        return _v(Risk.DANGER, DANGER_PROGRAMS["mv"])
 
     if name == "dd":
         if any(a.startswith("of=/dev/") for a in args):
@@ -296,6 +444,16 @@ def _program(prog: str, args: list[str]) -> RiskVerdict:
         return _package_manager(name, args)
 
     if name == "find":
+        destructive = "-delete" in args or any(a in {"-exec", "-execdir", "-ok", "-okdir"} for a in args)
+        if destructive:
+            starts = []
+            for a in args:  # start paths come before the first expression token
+                if a.startswith(("-", "(", "!")):
+                    break
+                starts.append(a)
+            precious = [t for t in (starts or ["."]) if _is_precious_tree(t, base)]
+            if precious:
+                return _v(Risk.BLOCKED, f"find over {precious[0]} could wipe your system or home folder")
         if "-delete" in args:
             return _v(Risk.DANGER, "find -delete removes every match")
         if any(a in {"-exec", "-execdir", "-ok", "-okdir"} for a in args):
@@ -306,6 +464,8 @@ def _program(prog: str, args: list[str]) -> RiskVerdict:
     if name in {"sed", "gsed"}:
         if any(a.startswith("-i") or a.startswith("--in-place") for a in args):
             return _v(Risk.DANGER, "sed -i edits files in place")
+        if any(SED_WRITE_OR_EXEC.search(a) for a in args if not a.startswith("-")):
+            return _v(Risk.DANGER, "sed script writes a file (w) or runs a command (e)")
         return _v(Risk.SAFE, "sed only prints")
     if name in {"awk", "gawk"}:
         if any("system" in a or ">" in a or "|" in a for a in args):
@@ -329,6 +489,10 @@ def _program(prog: str, args: list[str]) -> RiskVerdict:
             return _v(Risk.SAFE, f"docker {sub} only reads")
         return _v(Risk.DANGER, f"docker {sub} changes containers or images")
 
+    writer = _writes_despite_being_read_only(name, args)
+    if writer:
+        return _v(Risk.DANGER, writer)
+
     if name in INTERPRETERS:
         if args in (["--version"], ["-V"]):
             return _v(Risk.SAFE, "prints a version")
@@ -342,7 +506,7 @@ def _program(prog: str, args: list[str]) -> RiskVerdict:
     return _v(Risk.DANGER, f"{name!r} is not a command shellmate knows, so it can't vouch for it")
 
 
-def _segment(tokens: list[str]) -> RiskVerdict:
+def _segment(tokens: list[str], base: str | None) -> RiskVerdict:
     """Judge one simple command (no | && ; inside): its redirections, then its program."""
     verdicts: list[RiskVerdict] = []
     args: list[str] = []
@@ -377,7 +541,7 @@ def _segment(tokens: list[str]) -> RiskVerdict:
     while args and re.match(r"^[A-Za-z_]\w*=", args[0]):
         args.pop(0)  # FOO=bar before the program
     if args:
-        verdicts.append(_program(args[0], args[1:]))
+        verdicts.append(_program(args[0], args[1:], base))
     return _worst(verdicts) if verdicts else _v(Risk.SAFE, "nothing to run")
 
 
@@ -386,11 +550,24 @@ def _effective_program(tokens: list[str]) -> str:
     rest = list(tokens)
     while rest:
         name = os.path.basename(rest[0])
-        if name in PRIVILEGE or name in WRAPPERS or rest[0].startswith("-") or re.match(r"^\w+=", rest[0]):
+        if name in PRIVILEGE or name in WRAPPERS:
+            rest = _strip_prefix(name, rest[1:])
+            continue
+        if re.match(r"^[A-Za-z_]\w*=", rest[0]):
             rest.pop(0)
             continue
         return name
     return ""
+
+
+def _cd_target(seg: list[str], base: str | None) -> str | None:
+    """The folder a `cd` segment moves to (None when it can't be known)."""
+    args = [a for a in seg[1:] if a not in {"-L", "-P", "--"}]
+    if not args:
+        return os.path.expanduser("~")
+    if args[0] == "-":
+        return None
+    return _resolve(args[0], base)
 
 
 def _tokenize(command: str) -> list[str]:
@@ -400,7 +577,9 @@ def _tokenize(command: str) -> list[str]:
     return list(lexer)
 
 
-def classify(command: str) -> RiskVerdict:
+def classify(command: str, cwd: str | None = None) -> RiskVerdict:
+    """Label ``command``. ``cwd`` is the folder it will run in (default: the current one); relative
+    paths, and any `cd` inside the command, are resolved against it."""
     cmd = command.strip()
     if not cmd:
         return _v(Risk.DANGER, "empty command")
@@ -431,8 +610,11 @@ def classify(command: str) -> RiskVerdict:
     if current:
         segments.append((op_before, current))
 
+    base: str | None = os.path.abspath(cwd or os.getcwd())
     for idx, (op, seg) in enumerate(segments):
-        verdicts.append(_segment(seg))
+        verdicts.append(_segment(seg, base))
+        if _effective_program(seg) == "cd" and os.path.basename(seg[0]) == "cd":
+            base = _cd_target(seg, base)  # later segments run in the new folder
         if idx and op in {"|", "|&"} and _effective_program(seg) in INTERPRETERS:
             if _effective_program(segments[idx - 1][1]) in {"curl", "wget"}:
                 verdicts.append(_v(Risk.BLOCKED, "pipes a download straight into a shell"))

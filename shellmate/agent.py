@@ -162,18 +162,39 @@ def build_messages(request: str, steps: list[dict], *, cwd: str) -> list[tuple[s
 
 
 def repeated_command(command: str, steps: list[dict]) -> bool:
-    return any(step["command"] == command for step in steps)
+    """True when ``command`` already ran and nothing that could change its output ran since.
+
+    Walking back from the newest step: a step that wasn't SAFE (mkdir, git add ...) may have changed
+    what the command would print, so running it again after one is a real new step, not a repeat.
+    """
+    for step in reversed(steps):
+        if step["outcome"] != "ran":
+            continue
+        if step["command"] == command:
+            return True
+        if step.get("risk", "safe") != "safe":
+            return False
+    return False
+
+
+def refused_command(command: str, steps: list[dict]) -> dict | None:
+    """The earlier refusal of ``command``, if shellmate already refused it."""
+    return next((s for s in steps if s["outcome"] == "blocked" and s["command"] == command), None)
 
 
 def answer_is_a_command(answer: str, steps: list[dict]) -> bool:
     """Small models sometimes 'answer' with the command they just ran."""
     text = clean_command(answer.strip().strip("."))
-    return bool(text) and repeated_command(text, steps)
+    return bool(text) and any(step["command"] == text for step in steps)
 
 
 REPEAT_NUDGE = (
     "You already ran `{command}` and its output is above. Do not run it again. Reply with action "
     '"answer" and tell the user, in a sentence, what that output means for "{request}".'
+)
+REFUSED_NUDGE = (
+    "shellmate already refused `{command}` ({reason}) and will never run it. Do not propose it again. "
+    'Use a safer command, or reply with action "answer" and explain why it can\'t be done.'
 )
 ANSWER_NUDGE = (
     'Your answer was a command, not an answer. Reply with action "answer" and a sentence for the '

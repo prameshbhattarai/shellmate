@@ -105,3 +105,33 @@ def test_long_output_is_previewed(monkeypatch):
 def test_verbose_shows_everything(monkeypatch):
     result = invoke(monkeypatch, ScriptedDecider(run(LONG), answer("fifty lines")), ["--verbose", "ask", "x"])
     assert "more lines" not in result.output and "\n50\n" in result.output
+
+
+def test_end_of_input_at_the_prompt_skips(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    result = invoke(monkeypatch, ScriptedDecider(run("mkdir made"), answer("x")), ["ask", "x"], "")
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "skipped" in result.output and not (tmp_path / "made").exists()
+    assert result.exit_code == 0
+
+
+def test_end_of_input_while_editing_skips(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    result = invoke(monkeypatch, ScriptedDecider(run("mkdir made"), answer("x")), ["ask", "x"], "e\n")
+    assert "skipped" in result.output and not (tmp_path / "made").exists()
+
+
+def test_ctrl_c_is_reported_not_a_traceback(monkeypatch):
+    result = invoke(monkeypatch, ScriptedDecider(KeyboardInterrupt()), ["ask", "x"])
+    assert "interrupted" in result.output
+    assert result.exit_code == cli.EXIT_INTERRUPTED
+
+
+def test_repl_builds_the_graph_once(monkeypatch):
+    builds = []
+    real = cli.build_graph
+    monkeypatch.setattr(cli, "build_graph", lambda *a, **k: builds.append(1) or real(*a, **k))
+    decider = ScriptedDecider(run("echo one"), answer("first"), run("echo two"), answer("second"))
+    result = invoke(monkeypatch, decider, [], "a\nb\nexit\n")
+    assert "mate> first" in result.output and "mate> second" in result.output
+    assert len(builds) == 1

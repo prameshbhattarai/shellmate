@@ -28,12 +28,14 @@ from langgraph.types import interrupt
 
 from .agent import (
     ANSWER_NUDGE,
+    REFUSED_NUDGE,
     REPEAT_NUDGE,
     Decider,
     Decision,
     answer_is_a_command,
     build_messages,
     clean_command,
+    refused_command,
     repeated_command,
 )
 from .config import Settings
@@ -48,6 +50,7 @@ Status = Literal["answered", "declined", "dry_run", "step_limit", "model_error"]
 class Step(TypedDict, total=False):
     command: str
     outcome: Literal["ran", "blocked"]
+    risk: str  # the verdict it ran under; a non-SAFE step may have changed what later commands see
     exit_code: int
     stdout: str
     stderr: str
@@ -75,8 +78,12 @@ class AgentState(TypedDict, total=False):
 def _problem(decision: Decision, steps: list[Step], request: str) -> str | None:
     """What is wrong with a decision the graph must not act on, as a message back to the model."""
     command = clean_command(decision.command)
-    if decision.action == "run" and command and repeated_command(command, steps):
-        return REPEAT_NUDGE.format(command=command, request=request)
+    if decision.action == "run" and command:
+        refused = refused_command(command, steps)
+        if refused:
+            return REFUSED_NUDGE.format(command=command, reason=refused.get("note", "too dangerous"))
+        if repeated_command(command, steps):
+            return REPEAT_NUDGE.format(command=command, request=request)
     if decision.action == "answer" and answer_is_a_command(decision.answer, steps):
         return ANSWER_NUDGE.format(request=request)
     return None
@@ -89,8 +96,13 @@ def _echo(decision: Decision) -> str:
 FALLBACK_OUTPUT_CHARS = 800
 
 
-def _fallback_answer(steps: list[Step]) -> dict:
+def _fallback_answer(steps: list[Step], decision: Decision) -> dict:
     """The model kept repeating itself: show the user the last output instead of looping."""
+    refused = refused_command(clean_command(decision.command), steps) if decision.action == "run" else None
+    if refused:
+        reason = refused.get("note", "too dangerous")
+        text = f"shellmate won't run `{refused['command']}` ({reason}), and I found no safer way to do it."
+        return {"status": "answered", "answer": text, "command": ""}
     last = next((s for s in reversed(steps) if s["outcome"] == "ran"), None)
     if last is None:
         return {"status": "answered", "answer": "I couldn't work out how to answer that.", "command": ""}
@@ -118,7 +130,7 @@ def build_graph(decider: Decider, *, settings: Settings, cwd: str, checkpointer=
             if problem:  # one retry, with the problem spelled out
                 decision = decider.invoke(messages + [("ai", _echo(decision)), ("human", problem)])
                 if _problem(decision, steps, request):
-                    return _fallback_answer(steps)
+                    return _fallback_answer(steps, decision)
         except Exception as exc:  # connection refused, model missing, bad JSON ...
             return {"status": "model_error", "error": str(exc)}
         command = clean_command(decision.command)
@@ -128,7 +140,7 @@ def build_graph(decider: Decider, *, settings: Settings, cwd: str, checkpointer=
         return {"command": command, "explanation": decision.explanation.strip()}
 
     def classify_risk(state: AgentState) -> dict:
-        verdict = classify(state["command"])
+        verdict = classify(state["command"], cwd=cwd)
         update = {"risk": verdict.risk.value, "reason": verdict.reason}
         if state.get("dry_run"):
             update["status"] = "dry_run"
@@ -158,12 +170,12 @@ def build_graph(decider: Decider, *, settings: Settings, cwd: str, checkpointer=
             timeout_s=settings.command_timeout_s,
             max_output_chars=settings.max_output_chars,
         )
-        step = {"outcome": "ran", **asdict(result)}
+        step = {"outcome": "ran", "risk": state.get("risk", "danger"), **asdict(result)}
         step.pop("truncated", None)
         return {"steps": [step]}
 
     def refuse(state: AgentState) -> dict:
-        return {"steps": [{"command": state["command"], "outcome": "blocked", "note": state["reason"]}]}
+        return {"steps": [{"command": state["command"], "outcome": "blocked", "risk": "blocked", "note": state["reason"]}]}
 
     def after_decide(state: AgentState) -> str:
         return END if state.get("status") else "classify_risk"
