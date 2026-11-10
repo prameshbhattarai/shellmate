@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -50,6 +51,7 @@ Rules for commands:
 - git: `git diff` shows changes not yet committed. `git show` ALWAYS prints the whole diff unless
   you add -s, so for a commit's message or details use `git log`.
 - Prefer read-only commands. Never add sudo unless the user asked for it.
+- When an example below fits the request, use that command as it is.
 {os_rules}
 Examples of good commands:
 - "which folders here are eating my disk?" -> du -sh * | sort -rh | head -n 10
@@ -58,9 +60,53 @@ Examples of good commands:
 - "how many python files are in this project?" -> find . -name '*.py' -type f | wc -l
 {extras}"""
 
+# Rules for one operating system. Only the rules for the OS shellmate is running on go into the
+# prompt, so a small model never sees (and mixes in) another system's flags.
 MACOS_RULES = """- This is macOS: BSD tools, not GNU. No `find -printf`, no `sed -i` without '', no `du --max-depth`
-  (use `du -d 1`), no `ls --sort`.
+  (use `du -d 1`), no `ls --sort`, no `ps --sort` or `ps -e --format`.
+- Processes by memory: `ps -Ao pid,%mem,rss,comm -m | head -n 11`; by CPU: `ps -Ao pid,%cpu,comm -r | head -n 11`.
+  `ps -m` / `ps -r` already sort, so don't pipe them into sort. macOS ps has no `cmd` column (use `comm`).
+- Ports: `lsof -nP -iTCP:3000 -sTCP:LISTEN`. Free memory: `vm_stat` or `top -l 1 | head -n 10` (no `free`).
+- OS version: `sw_vers`. Open a file or folder: `open`. Clipboard: `pbcopy` / `pbpaste`.
+- Example: "what is using the most memory?" -> ps -Ao pid,%mem,rss,comm -m | head -n 11
 """
+
+LINUX_RULES = """- This is Linux: GNU coreutils. `sed -i` needs no '' argument, `du --max-depth=1` and `find -printf` work.
+- Processes by memory: `ps aux --sort=-%mem | head -n 11`; by CPU: `ps aux --sort=-%cpu | head -n 11`.
+- Free memory: `free -h`. Ports: `ss -ltnp` (or `lsof -i :3000`). Disks: `df -h`, `lsblk`.
+- OS version: `cat /etc/os-release` (no `sw_vers`). Services: `systemctl status NAME` (reading only).
+  Open a file: `xdg-open`. Logs: `journalctl -n 50 --no-pager`.
+- Package managers differ by distro (apt, dnf, pacman): check /etc/os-release before suggesting one.
+- Example: "what is using the most memory?" -> ps aux --sort=-%mem | head -n 11
+"""
+
+WINDOWS_RULES = """- This is Windows, running shellmate from a POSIX shell (Git Bash / MSYS2). Unix tools there are
+  GNU versions, but Windows' own tools are not Unix: `ps` is limited, there is no `free`, `lsof` or `sw_vers`.
+- Processes by memory: `tasklist //FO TABLE | sort -k5 -rn | head -n 11`, or
+  `powershell -NoProfile -Command "Get-Process | Sort-Object WS -Descending | Select-Object -First 10"`.
+- Ports: `netstat -ano | grep LISTENING`. OS version: `cmd //c ver`. Open a file: `start`.
+- Paths: use forward slashes (C:/Users/...), and quote paths with spaces. Drives appear as /c/, /d/.
+- In Git Bash, flags for Windows tools start with // (e.g. `tasklist //FI "IMAGENAME eq node.exe"`).
+- Example: "what is using the most memory?" -> tasklist //FO TABLE | sort -k5 -rn | head -n 11
+"""
+
+OS_RULES = {"macOS": MACOS_RULES, "Linux": LINUX_RULES, "Windows": WINDOWS_RULES}
+
+
+def os_name() -> str:
+    """The OS shellmate runs on: "macOS", "Linux", "Windows", or whatever platform.system() says."""
+    system = platform.system()
+    if system == "Darwin":
+        return "macOS"
+    if system.startswith(("CYGWIN", "MSYS", "MINGW")):
+        return "Windows"
+    return system or "unknown"
+
+
+def os_rules(name: str | None = None) -> str:
+    """Only the rules for this OS; an OS without rules gets none."""
+    return OS_RULES.get(name or os_name(), "")
+
 
 # Older outputs are cut harder than the newest ones, so a long session still fits a small context.
 RECENT_STEPS_IN_FULL = 2
@@ -175,13 +221,13 @@ def clean_command(command: str) -> str:
 
 
 def system_prompt(cwd: str, context: PromptContext | None = None) -> str:
-    os_name = "macOS" if platform.system() == "Darwin" else platform.system()
+    name = os_name()
     shell = os.path.basename(os.environ.get("SHELL") or "/bin/sh")
     return SYSTEM_PROMPT.format(
-        os_name=os_name,
+        os_name=name,
         shell=shell,
         cwd=cwd,
-        os_rules=MACOS_RULES if os_name == "macOS" else "",
+        os_rules=os_rules(name),
         extras=(context or PromptContext()).render(),
     )
 
@@ -196,6 +242,8 @@ def observation(step: dict, *, full: bool) -> str:
         return f"shellmate refused to run that: {step['note']}. Do not retry it."
     limit = 10**9 if full else OLD_OUTPUT_CHARS
     parts = [f"exit code {step['exit_code']}"]
+    if step["exit_code"] == 0 and step_failed(step):
+        parts[0] += " (but it printed only errors, so it did not work)"
     if step.get("stdout", "").strip():
         parts.append("stdout:\n" + _cut(step["stdout"].rstrip(), limit))
     if step.get("stderr", "").strip():
@@ -209,6 +257,51 @@ NEXT_STEP_HINT = (
     '\n\nIf this output answers "{request}", reply with action "answer" and tell the user what it '
     "means in a sentence. Otherwise take a DIFFERENT step."
 )
+FAILED_HINT = (
+    "\n\nThat step FAILED ({how}): the output above is an error, not an answer. "
+    "Do not describe results you did not get. Read the error, then run a corrected command "
+    '(for example with different flags), or reply with action "answer" and tell the user it failed and why.'
+)
+FAILED_ANSWER_NUDGE = (
+    "Your last step failed ({how}) with: {error}\n"
+    "Your answer must not claim it worked. Either run a corrected command, or answer by saying the "
+    "command failed and why."
+)
+
+
+def step_failed(step: dict) -> bool:
+    """A command or tool that failed. A pipeline reports only its last command's exit code, so
+    `ps -x | sort -bad | head` exits 0 with nothing but errors: errors and no output count as failed."""
+    if step["outcome"] not in {"ran", "tool"}:
+        return False
+    if step.get("exit_code", 0) != 0:
+        return True
+    return bool(step.get("stderr", "").strip()) and not step.get("stdout", "").strip()
+
+
+def failure_label(step: dict) -> str:
+    code = step.get("exit_code", 0)
+    return f"exit code {code}" if code else "it printed only errors"
+
+
+def last_failure(steps: list[dict]) -> dict | None:
+    """The newest step, when it failed."""
+    return steps[-1] if steps and step_failed(steps[-1]) else None
+
+
+PLACEHOLDER = re.compile(r"\[[a-z%_]+(?: [a-z%_]+){0,2}]")
+
+
+def answer_has_placeholders(answer: str) -> bool:
+    """Small models sometimes answer with a template, e.g. "[comm] uses [percent] percent"."""
+    return bool(PLACEHOLDER.search(answer))
+
+
+PLACEHOLDER_NUDGE = (
+    "Your answer contains placeholders like [name] instead of real values. Only state values you "
+    "actually saw in a command's output. If no command worked yet, run a working one, or tell the "
+    "user it didn't work."
+)
 
 
 def build_messages(
@@ -219,7 +312,8 @@ def build_messages(
         latest = i == len(steps) - 1
         text = observation(step, full=i >= len(steps) - RECENT_STEPS_IN_FULL)
         if latest:
-            text += NEXT_STEP_HINT.format(request=request)  # small models need the reminder right here
+            failed = last_failure(steps)  # small models need the reminder right here
+            text += FAILED_HINT.format(how=failure_label(failed)) if failed else NEXT_STEP_HINT.format(request=request)
         said = step["command"] if step["outcome"] == "tool" else f"run: {step['command']}"
         messages.append(("ai", said))
         messages.append(("human", text))

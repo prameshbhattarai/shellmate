@@ -270,3 +270,56 @@ def test_last_error_prefers_this_folder(settings, tmp_path, isolated_home):
     graph = build_graph(decider, settings=settings, cwd=str(tmp_path), history=history)
     graph.invoke({"request": "x", "steps": []}, {"configurable": {"thread_id": "t"}})
     assert "here broke" in decider.last_message() and "elsewhere" not in decider.last_message()
+
+
+def test_failed_command_gets_a_failure_hint(settings, tmp_path):
+    decider = ScriptedDecider(run("ps aux --sort=-%mem"), run("ps -Ao pid,%mem,comm -m"), answer("ok"))
+    drive(decider, settings, tmp_path)
+    assert "FAILED" in decider.calls[1][-1][1]
+
+
+def test_answer_right_after_a_failure_is_questioned_once(settings, tmp_path):
+    decider = ScriptedDecider(
+        run("cat missing.txt"),
+        answer("The output shows the file contents."),  # pretends it worked
+        answer("cat failed: missing.txt does not exist."),
+    )
+    state, _ = drive(decider, settings, tmp_path)
+    assert "must not claim it worked" in decider.last_message()
+    assert state["answer"] == "cat failed: missing.txt does not exist."
+
+
+def test_answer_after_a_failure_may_fix_the_command(settings, tmp_path):
+    (tmp_path / "real.txt").write_text("hello\n")
+    decider = ScriptedDecider(run("cat missing.txt"), answer("done"), run("cat real.txt"), answer("it says hello"))
+    state, _ = drive(decider, settings, tmp_path)
+    assert [s["command"] for s in state["steps"]] == ["cat missing.txt", "cat real.txt"]
+    assert state["answer"] == "it says hello"
+
+
+def test_pipeline_with_only_errors_counts_as_failed(settings, tmp_path):
+    # exits 0 (head succeeds) but sort fails: the replay of the real Qwen session
+    decider = ScriptedDecider(run("ps -Ao pid,%mem,comm -m | sort -r %2 | head -n 1"), answer("[comm] uses [percent]"),
+                              answer("sort failed, so I have no result yet."))
+    state, _ = drive(decider, settings, tmp_path)
+    assert "printed only errors" in decider.calls[1][-1][1]
+    assert state["answer"] == "sort failed, so I have no result yet."
+
+
+def test_failed_tool_counts_as_failure(settings, tmp_path):
+    decider = ScriptedDecider(tool("read_file", "nope.txt"), answer("It contains the data."), answer("nope.txt does not exist."))
+    state, _ = drive(decider, settings, tmp_path)
+    assert "must not claim it worked" in decider.last_message()
+    assert state["answer"] == "nope.txt does not exist."
+
+
+def test_placeholder_answer_is_rejected(settings, tmp_path):
+    decider = ScriptedDecider(run("echo 123 python"), answer("[comm] uses [percent] percent"), answer("python, pid 123."))
+    state, _ = drive(decider, settings, tmp_path)
+    assert "placeholders" in decider.last_message() and state["answer"] == "python, pid 123."
+
+
+def test_template_answer_after_failures_falls_back_to_the_error(settings, tmp_path):
+    decider = ScriptedDecider(run("cat missing.txt"), answer("The value is [value]."))
+    state, _ = drive(decider, settings, tmp_path)
+    assert state["answer"].startswith("I couldn't get an answer") and "cat missing.txt" in state["answer"]

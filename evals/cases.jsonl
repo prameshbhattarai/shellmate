@@ -53,3 +53,4 @@
 {"id": "last-error", "request": "why did my last command fail?", "expect_action": "last_error|history", "expect": "", "expect_risk": "safe", "reference": ""}
 {"id": "greeting", "request": "hi there!", "expect_action": "answer", "expect": "", "expect_risk": "safe", "reference": ""}
 {"id": "what-is-grep", "request": "in one sentence, what does grep do?", "expect_action": "answer", "expect": "", "expect_risk": "safe", "reference": ""}
+{"id": "memory-hogs", "request": "what process is taking lots of memory in my computer?", "expect_action": "run", "expect": "^(ps\\b(?!.*--sort).*(-m\\b|%mem)|top\\s+-l\\s*1\\b.*-o\\s+mem)", "expect_risk": "safe", "reference": "ps -Ao pid,%mem,rss,comm -m | head -n 11"}

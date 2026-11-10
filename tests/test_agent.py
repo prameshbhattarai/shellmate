@@ -60,3 +60,39 @@ def test_answer_is_a_command():
     assert answer_is_a_command("git log -1 --format=%B", steps)
     assert answer_is_a_command("`git log -1 --format=%B`", steps)
     assert not answer_is_a_command("Your last commit was 'agent skeleton.'", steps)
+
+
+def test_placeholders():
+    from shellmate.agent import answer_has_placeholders
+
+    assert answer_has_placeholders("The process is [comm] with [percent] percent")
+    assert not answer_has_placeholders("IntelliJ uses 8.1% [1.3 GB]")
+    assert not answer_has_placeholders("Your last commit was 'agent skeleton.'")
+
+
+import pytest  # noqa: E402
+
+from shellmate import agent  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "system, name, present, absent",
+    [
+        ("Darwin", "macOS", "ps -Ao pid,%mem,rss,comm -m", "--sort=-%mem"),
+        ("Linux", "Linux", "ps aux --sort=-%mem", "vm_stat"),
+        ("Windows", "Windows", "tasklist", "--sort=-%mem"),
+        ("MINGW64_NT-10.0", "Windows", "Git Bash", "ps -Ao"),
+    ],
+)
+def test_only_this_os_rules_reach_the_prompt(monkeypatch, system, name, present, absent):
+    monkeypatch.setattr(agent.platform, "system", lambda: system)
+    prompt = agent.system_prompt("/w")
+    assert f"Environment: {name}" in prompt
+    assert present in prompt and absent not in prompt
+
+
+def test_unknown_os_gets_no_rules(monkeypatch):
+    monkeypatch.setattr(agent.platform, "system", lambda: "FreeBSD")
+    prompt = agent.system_prompt("/w")
+    assert "Environment: FreeBSD" in prompt
+    assert not any(rules.strip() in prompt for rules in agent.OS_RULES.values())

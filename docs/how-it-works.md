@@ -352,7 +352,7 @@ history keeps command output, which can include secrets.
 
 ## 10. Evals
 
-`evals/cases.jsonl` holds 55 requests, each with the action that counts, a regex for the command,
+`evals/cases.jsonl` holds 56 requests, each with the action that counts, a regex for the command,
 the risk level the rules must give it, and a known-good reference command.
 
 - `python evals/run_evals.py --check` needs no model. It checks that every reference matches its

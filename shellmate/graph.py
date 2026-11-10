@@ -29,6 +29,11 @@ from langgraph.types import interrupt
 
 from .agent import (
     ANSWER_NUDGE,
+    FAILED_ANSWER_NUDGE,
+    PLACEHOLDER_NUDGE,
+    answer_has_placeholders,
+    failure_label,
+    step_failed,
     REFUSED_NUDGE,
     REPEAT_NUDGE,
     TOOL_ACTIONS,
@@ -36,6 +41,7 @@ from .agent import (
     Decision,
     PromptContext,
     answer_is_a_command,
+    last_failure,
     build_messages,
     clean_command,
     refused_command,
@@ -96,6 +102,8 @@ def _problem(decision: Decision, steps: list[Step], request: str) -> str | None:
         return REPEAT_NUDGE.format(command=key, request=request)
     if decision.action == "answer" and answer_is_a_command(decision.answer, steps):
         return ANSWER_NUDGE.format(request=request)
+    if decision.action == "answer" and answer_has_placeholders(decision.answer):
+        return PLACEHOLDER_NUDGE
     return None
 
 
@@ -116,6 +124,10 @@ def _fallback_answer(steps: list[Step], decision: Decision) -> dict:
     last = next((s for s in reversed(steps) if s["outcome"] in ("ran", "tool")), None)
     if last is None:
         return {"status": "answered", "answer": "I couldn't work out how to answer that.", "command": ""}
+    if step_failed(last):  # never dress an error up as an answer
+        error = (last.get("stderr") or last.get("stdout") or "no output").strip().splitlines()[0]
+        text = f"I couldn't get an answer: my last attempt, `{last['command']}`, failed ({error})."
+        return {"status": "answered", "answer": text, "command": ""}
     out = (last.get("stdout") or last.get("stderr") or "(no output)").strip()
     if len(out) > FALLBACK_OUTPUT_CHARS:
         out = out[:FALLBACK_OUTPUT_CHARS] + " ..."
@@ -169,6 +181,14 @@ def build_graph(
                 decision = decider.invoke(messages + [("ai", _echo(decision)), ("human", problem)])
                 if _problem(decision, steps, request):
                     return _fallback_answer(steps, decision)
+            failed = last_failure(steps)
+            if decision.action == "answer" and failed:
+                # answering straight after a failure: make the model look at the error once more.
+                # Whatever it says then is accepted, since "it failed because ..." is a fine answer.
+                error = (failed.get("stderr") or failed.get("stdout") or "").strip().splitlines()[:1]
+                nudge = FAILED_ANSWER_NUDGE.format(how=failure_label(failed), error=error[0] if error else "(no output)")
+                retry = decider.invoke(messages + [("ai", _echo(decision)), ("human", nudge)])
+                decision = retry if not _problem(retry, steps, request) else decision
         except Exception as exc:  # connection refused, model missing, bad JSON ...
             return {"status": "model_error", "error": str(exc)}
         if decision.action in TOOL_ACTIONS:

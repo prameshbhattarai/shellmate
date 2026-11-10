@@ -83,8 +83,8 @@ def test_step_limit_exit_code(monkeypatch):
 
 
 def test_text_is_not_rich_markup(monkeypatch):
-    result = invoke(monkeypatch, ScriptedDecider(run("echo '[bold]hi[/bold]'"), answer("[red]x[/red]")), ["ask", "x"])
-    assert "[bold]hi[/bold]" in result.output and "[red]x[/red]" in result.output
+    result = invoke(monkeypatch, ScriptedDecider(run("echo '[bold]hi[/bold]'"), answer("[#f00]x[/#f00]")), ["ask", "x"])
+    assert "[bold]hi[/bold]" in result.output and "[#f00]x[/#f00]" in result.output
 
 
 def test_repl(monkeypatch):

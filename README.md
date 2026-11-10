@@ -71,7 +71,7 @@ mate> I won't do that: it would wipe your home folder.
   explaining each command so you learn it.
 - **Ctrl-G from your prompt**: `eval "$(shellmate init zsh)"`, then type a request and press
   Ctrl-G instead of Enter.
-- **Evals**: 55 cases scored per model, and checked for consistency in CI.
+- **Evals**: 56 cases scored per model, and checked for consistency in CI.
 
 ## Quick start
 
@@ -295,9 +295,9 @@ shellmate/
   shell_init.py  # zsh Ctrl-G binding
   config.py      # settings from env; builds the chat model lazily
 docs/            # how-it-works.md (flowcharts), demo.gif and its demo.cast
-evals/           # 55 cases and the scorer
+evals/           # 56 cases and the scorer
 scripts/         # demo.sh records the GIF (replay by default, --live for a real model)
-tests/           # 265 unit tests with a scripted fake model; never call Ollama
+tests/           # 278 unit tests with a scripted fake model; never call Ollama
 ```
 
 ## Roadmap
@@ -307,7 +307,7 @@ tests/           # 265 unit tests with a scripted fake model; never call Ollama
 - [x] LangGraph loop with `interrupt()` approvals
 - [x] Tools for files, history and "explain my last error"
 - [x] Memory across sessions: SQLite checkpoints, resume, notes
-- [x] Eval set (55 cases) and scorer; consistency check in CI
+- [x] Eval set (56 cases) and scorer; consistency check in CI
 - [x] Extras: personas, teach mode, `shellmate undo`, zsh key binding
 - [x] Demo GIF (`./scripts/demo.sh`)
 - [ ] Fill in the eval table (`python evals/run_evals.py --model qwen2.5:3b,qwen2.5:7b`)
