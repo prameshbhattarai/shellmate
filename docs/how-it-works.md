@@ -38,9 +38,8 @@ flowchart LR
 | `agent.py` | Everything the model sees and returns: system prompt, `Decision` schema, how outputs are fed back, repeat guards |
 | `risk.py` | Pure-Python rules that label a command SAFE, CAUTION, DANGER or BLOCKED |
 | `tools.py` | `run_command` (timeout, own process group, no keyboard input, capped output) and the read-only `read_file` / `list_dir`, confined to the working folder |
-| `memory.py` | What lasts between sessions, under `~/.shellmate`: command history, remembered notes, SQLite checkpoints, the paused run |
-| `undo.py` | Works out the inverse of the last change (`mkdir` -> `rmdir`, `git commit` -> `git reset --soft HEAD~1` ...) |
-| `shell_init.py` | The zsh Ctrl-G key binding printed by `shellmate init zsh` |
+| `memory.py` | The SQLite checkpointer and the paused-run file, for `shellmate resume` |
+| `replay.py` | Scripted model answers for the demo recording (no model) |
 | `config.py` | Settings from `.env` and builds the Ollama chat model lazily (only on the first request) |
 
 ---
@@ -90,7 +89,7 @@ flowchart TD
     decide -->|"step limit reached"| END_L([END: step_limit])
     decide -->|"model unreachable / bad output"| END_E([END: model_error])
     decide -->|"run a command"| classify
-    decide -->|"read_file / list_dir / history / last_error"| tool
+    decide -->|"read_file / list_dir"| tool
 
     tool["use_tool<br/>read-only, inside the working folder"]
     tool --> decide
@@ -121,7 +120,7 @@ flowchart TD
 | `use_tool` | `tool`, `path` | appends a step: `{command: "read_file README.md", outcome: "tool", ...}` | No risk check or approval: the tools only read, and refuse paths outside the working folder (symlinks included) |
 | `classify_risk` | `command` | `risk`, `reason` (and `status: dry_run` in a dry run) | Rules only, no model call |
 | `ask_human` | `command`, `risk`, `reason`, `explanation` | `reply` (`run` / `edit` / `skip`), maybe a new `command` | Calls LangGraph's `interrupt()`. The graph pauses here until the CLI resumes it |
-| `run` | `command`, `risk` | appends a step: `{command, outcome: "ran", risk, exit_code, stdout, stderr}`, and logs it to the history | Output is cut at 4000 chars and decoded as UTF-8 (bad bytes replaced). 30 s timeout, after which the whole process group is killed |
+| `run` | `command`, `risk` | appends a step: `{command, outcome: "ran", risk, exit_code, stdout, stderr}` | Output is cut at 4000 chars and decoded as UTF-8 (bad bytes replaced). 30 s timeout, after which the whole process group is killed |
 | `refuse` | `command`, `reason` | appends a step: `{command, outcome: "blocked", note}` | The model is told it was refused, so it can try something else |
 
 ### The loop's safety limits
@@ -298,22 +297,20 @@ harmless: `echo`, `mkdir` and `rm` on temp files.
 | `test_cli.py` | prompts, `yes` vs `y`, output preview, `--verbose`, exit codes, the REPL |
 | `test_agent.py` | prompt building, cutting old outputs, `clean_command` |
 | `test_tools.py` | timeout kills the pipeline, binary output, truncation, `read_file` / `list_dir` confinement |
-| `test_memory.py` | history, notes, paused runs, damaged files |
-| `test_undo.py` | which changes have an inverse, and which never get a guessed one |
+| `test_memory.py` | the paused-run file, private permissions, damaged files |
+| `test_replay.py` | replay mode for the demo |
 | `test_evals.py` | the eval set is consistent, and the scorer with a scripted model |
 
 Every test gets its own `SHELLMATE_HOME` (see `tests/conftest.py`), so none touches `~/.shellmate`.
 
 ---
 
-## 9. Memory, resume and undo
+## 9. Memory: checkpoints and resume
 
-Everything lives under `SHELLMATE_HOME` (default `~/.shellmate`):
+Two files live under `SHELLMATE_HOME` (default `~/.shellmate`), private to you (folder 0700, files 0600):
 
 | File | Holds | Used by |
 |---|---|---|
-| `history.jsonl` | every command shellmate ran: folder, risk, exit code, output tails (last 1000) | the `history` and `last_error` tools, `shellmate history`, `shellmate explain`, `shellmate undo` |
-| `profile.json` | notes from `shellmate remember "..."` | added to every system prompt |
 | `checkpoints.sqlite` | LangGraph checkpoints of a paused run (finished runs are deleted) | `shellmate resume` |
 | `pending.json` | which thread is paused, its request and folder | `shellmate resume` |
 
@@ -335,24 +332,14 @@ sequenceDiagram
     CLI->>DB: run, finish, delete the thread
 ```
 
-**Undo** looks up the newest successful, non-SAFE command shellmate ran in the current folder that
-has not been undone yet. It works out its inverse only for changes it understands: `mkdir`, `git add`
-/ `commit` / `switch` / `stash` / `branch`, `mv` and `ln -s`. Anything else (`rm`, `cp`, `touch`,
-pipelines ...) is reported as not undoable; it never guesses. The inverse goes through the same risk
-check and prompt as any command, so undoing a commit (`git reset --soft`) still needs `yes`.
-
-Git inverses are relative to the repository's current state, so right after a git command runs
-shellmate records HEAD, the branch and the top stash with the history entry. `undo` compares them
-with the repository now, and refuses if any moved, for example because you committed by hand since.
-
-Everything in `~/.shellmate` is private to you: the folder is 0700 and each file 0600, because the
-history keeps command output, which can include secrets.
+The only code change between "forgets on exit" and "survives a restart" is the checkpointer passed
+to `graph.compile()`: `InMemorySaver` in tests, `SqliteSaver` in the CLI (`memory.checkpointer`).
 
 ---
 
 ## 10. Evals
 
-`evals/cases.jsonl` holds 56 requests, each with the action that counts, a regex for the command,
+`evals/cases.jsonl` holds 55 requests, each with the action that counts, a regex for the command,
 the risk level the rules must give it, and a known-good reference command.
 
 - `python evals/run_evals.py --check` needs no model. It checks that every reference matches its

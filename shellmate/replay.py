@@ -1,5 +1,8 @@
 """Replay mode, for demos: scripted model answers instead of a live model.
 
+It works because the graph only needs an object with ``invoke(messages) -> Decision``: anything
+shaped like a LangChain Runnable can stand in for the model.
+
     SHELLMATE_REPLAY=scripts/demo_replay.json shellmate
 
 The file is a JSON list of decisions, used in order across the whole session, e.g.

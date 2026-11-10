@@ -1,10 +1,17 @@
-"""Tools: the only actions the agent can take.
+"""Agent concept: tools, the only things the agent can do in the world.
+
+The model only *names* a tool (an action in its Decision); graph.py calls the function here and
+sends the result back to the model as the next message. That's the whole idea of tool use.
 
 - ``run_command``: runs only after the risk gate, with a timeout, inside the working folder, and
   returns capped stdout/stderr plus the exit code (never raises on a failing command).
 - ``read_file`` / ``list_dir``: read-only and confined to the working folder, so they need no
   approval. They raise :class:`ToolError` with a message meant for the model.
-- ``history`` / ``last_error`` live in memory.py: they read shellmate's own command log.
+
+(LangChain also has a ``@tool`` decorator and ``model.bind_tools()`` for native tool calling.
+shellmate uses structured output instead, because small local models follow a JSON schema more
+reliably than tool-call formats. Adding a tool is the same either way: a function plus a way for
+the model to ask for it.)
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Settings, read from the environment (and a local .env file).
+"""LangChain concept: the chat model. Plus settings, read from the environment (and a local .env).
 
 The chat model is built lazily by :func:`chat_model`, so importing shellmate never contacts Ollama.
 """
@@ -44,13 +44,18 @@ def get_settings() -> Settings:
 
 @lru_cache(maxsize=4)
 def chat_model(model: str | None = None):
-    """Return the chat model, building it on first use. Not called at import time."""
+    """Return the chat model, building it on first use. Not called at import time.
+
+    LangChain: every provider has a chat model class with the same interface (ChatOllama,
+    ChatAnthropic, ChatOpenAI ...), so switching providers is a one-line change here. Try:
+    ``chat_model().invoke("hello")`` returns an AIMessage; ``.stream("hello")`` yields it in chunks.
+    """
     from langchain_ollama import ChatOllama
 
     settings = get_settings()
     return ChatOllama(
         model=model or settings.model,
         base_url=settings.base_url,
-        num_ctx=settings.num_ctx,
-        temperature=0,
+        num_ctx=settings.num_ctx,  # context window in tokens; Ollama reloads the model if this changes
+        temperature=0,  # same input -> same command: an agent wants predictable, not creative
     )

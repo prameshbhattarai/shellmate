@@ -1,4 +1,9 @@
-"""A scripted stand-in for the model, so no test ever calls Ollama."""
+"""A scripted stand-in for the model, so no test ever calls Ollama.
+
+Testing agents: the graph only calls ``decider.invoke(messages)``, so a fake that returns a fixed
+list of Decisions lets a test script a whole conversation ("run X, then repeat X, then answer") and
+check what the graph does with it: fast, free and the same on every run.
+"""
 
 from __future__ import annotations
 

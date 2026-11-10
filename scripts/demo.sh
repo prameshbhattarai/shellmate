@@ -6,7 +6,7 @@
 #   ./scripts/demo.sh --live        # real session: you type, against your local model
 #
 # Both write docs/demo.cast and docs/demo.gif. They run in a throwaway folder with their own
-# SHELLMATE_HOME, so nothing outside it is touched and your history stays clean.
+# SHELLMATE_HOME, so nothing outside it is touched and your own paused runs are left alone.
 #
 # In replay mode only the model is scripted (scripts/demo_replay.json); the risk rules, prompts,
 # commands and their output are real, and the banner says "model=replay (scripted answers)".

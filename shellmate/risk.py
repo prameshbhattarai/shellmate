@@ -1,5 +1,9 @@
 """Risk classification for shell commands. Rules only: the model never decides what is safe.
 
+(Plain Python, no LangChain: optional reading. The idea that matters for agents: put a hard,
+testable check between "the model chose an action" and "the action runs". graph.classify_risk is
+where this file plugs into the loop.)
+
 Levels, from least to most risky:
 
 - SAFE     read-only (ls, du, cat, git log ...). Still shown before it runs.

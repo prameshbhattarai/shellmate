@@ -205,9 +205,6 @@ def test_steps_record_their_risk(settings, tmp_path):
 
 from fakes import tool  # noqa: E402
 
-from shellmate.agent import PromptContext  # noqa: E402
-from shellmate.memory import History  # noqa: E402
-
 
 def test_read_file_needs_no_approval_and_reaches_the_model(settings, tmp_path):
     (tmp_path / "README.md").write_text("# shellmate\n")
@@ -232,44 +229,10 @@ def test_list_dir(settings, tmp_path):
     assert "docs/" in decider.last_message()
 
 
-def test_commands_are_logged_and_last_error_reads_them(settings, tmp_path, isolated_home):
-    history = History(isolated_home)
-    graph_decider = ScriptedDecider(run("cat missing.txt"), tool("last_error"), answer("missing.txt is not there"))
-    graph = build_graph(graph_decider, settings=settings, cwd=str(tmp_path), history=history)
-    graph.invoke({"request": "x", "steps": []}, {"configurable": {"thread_id": "t"}})
-    assert history.recent()[0]["command"] == "cat missing.txt"
-    assert "cat missing.txt" in graph_decider.last_message() and "No such file" in graph_decider.last_message()
-
-
-def test_history_tool_without_history(settings, tmp_path):
-    decider = ScriptedDecider(tool("history"), answer("no history"))
-    drive(decider, settings, tmp_path)
-    assert "not available" in decider.last_message()
-
-
 def test_repeated_tool_call_is_caught(settings, tmp_path):
     decider = ScriptedDecider(tool("list_dir", "."), tool("list_dir", "."), answer("done"))
     state, _ = drive(decider, settings, tmp_path)
     assert len(state["steps"]) == 1 and "already did `list_dir .`" in decider.last_message()
-
-
-def test_prompt_context_reaches_the_system_prompt(settings, tmp_path):
-    decider = ScriptedDecider(answer("ahoy"))
-    context = PromptContext(persona="pirate", teach=True, notes=("my projects live in ~/code",))
-    graph = build_graph(decider, settings=settings, cwd=str(tmp_path), context=context)
-    graph.invoke({"request": "hi", "steps": []}, {"configurable": {"thread_id": "t"}})
-    system = decider.calls[0][0][1]
-    assert "my projects live in ~/code" in system and "pirate" in system and "Teaching mode" in system
-
-
-def test_last_error_prefers_this_folder(settings, tmp_path, isolated_home):
-    history = History(isolated_home)
-    history.append({"command": "make here", "cwd": str(tmp_path), "exit_code": 2, "risk": "danger", "stderr": "here broke"})
-    history.append({"command": "npm test", "cwd": "/elsewhere", "exit_code": 1, "risk": "danger", "stderr": "elsewhere broke"})
-    decider = ScriptedDecider(tool("last_error"), answer("ok"))
-    graph = build_graph(decider, settings=settings, cwd=str(tmp_path), history=history)
-    graph.invoke({"request": "x", "steps": []}, {"configurable": {"thread_id": "t"}})
-    assert "here broke" in decider.last_message() and "elsewhere" not in decider.last_message()
 
 
 def test_failed_command_gets_a_failure_hint(settings, tmp_path):

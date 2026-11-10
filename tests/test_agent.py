@@ -96,3 +96,12 @@ def test_unknown_os_gets_no_rules(monkeypatch):
     prompt = agent.system_prompt("/w")
     assert "Environment: FreeBSD" in prompt
     assert not any(rules.strip() in prompt for rules in agent.OS_RULES.values())
+
+
+def test_tool_actions_and_the_schema_come_from_one_list():
+    from typing import get_args
+
+    from shellmate.agent import TOOL_ACTIONS, Action
+
+    assert set(TOOL_ACTIONS) <= set(get_args(Action))
+    assert set(get_args(Action)) == {"run", "answer", *TOOL_ACTIONS}
