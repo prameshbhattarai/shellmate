@@ -236,7 +236,7 @@ def test_repeated_tool_call_is_caught(settings, tmp_path):
 
 
 def test_failed_command_gets_a_failure_hint(settings, tmp_path):
-    decider = ScriptedDecider(run("ps aux --sort=-%mem"), run("ps -Ao pid,%mem,comm -m"), answer("ok"))
+    decider = ScriptedDecider(run("ls no-such-folder"), run("ls ."), answer("ok"))
     drive(decider, settings, tmp_path)
     assert "FAILED" in decider.calls[1][-1][1]
 
@@ -262,7 +262,7 @@ def test_answer_after_a_failure_may_fix_the_command(settings, tmp_path):
 
 def test_pipeline_with_only_errors_counts_as_failed(settings, tmp_path):
     # exits 0 (head succeeds) but sort fails: the replay of the real Qwen session
-    decider = ScriptedDecider(run("ps -Ao pid,%mem,comm -m | sort -r %2 | head -n 1"), answer("[comm] uses [percent]"),
+    decider = ScriptedDecider(run("echo data | sort -r no-such-file | head -n 1"), answer("[comm] uses [percent]"),
                               answer("sort failed, so I have no result yet."))
     state, _ = drive(decider, settings, tmp_path)
     assert "printed only errors" in decider.calls[1][-1][1]
